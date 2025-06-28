@@ -2,7 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import io
-import altair as alt
+import plotly.figure_factory as ff
+import altair as alt  # Keep altair for other potential charts if needed
 
 # --- Configuration and Page Setup ---
 st.set_page_config(
@@ -48,7 +49,7 @@ def load_real_data():
 
         except FileNotFoundError:
             st.error(
-                f"Error: The file '{filename}' was not found in the same directory as the script. Please make sure all CSV files are present.")
+                f"Error: The file '{filename}' was not found. Please place it in the same directory as the script.")
             # Return an empty dict to prevent further errors
             return {}
         except Exception as e:
@@ -99,13 +100,14 @@ st.markdown("Insights from the Q1 2025 SDWIS Data Export for the State of Georgi
 st.sidebar.header("Filter by Water System")
 # Create a mapping from PWSID to a more descriptive name for the selectbox
 pws_options = data['SDWA_PUB_WATER_SYSTEMS'][['PWSID', 'PWS_NAME', 'CITY_NAME']].copy()
+pws_options.dropna(subset=['PWS_NAME', 'CITY_NAME'], inplace=True)
 pws_options['display_name'] = pws_options['PWS_NAME'] + " (" + pws_options['CITY_NAME'].astype(str) + ", " + \
                               pws_options['PWSID'] + ")"
 pws_display_map = pd.Series(pws_options.PWSID.values, index=pws_options.display_name).to_dict()
 
 selected_pws_display = st.sidebar.selectbox(
     "Select a Public Water System:",
-    options=sorted([str(x) for x in pws_display_map.keys()]),
+    options=sorted(pws_display_map.keys()),
     index=0
 )
 selected_pwsid = pws_display_map[selected_pws_display]
@@ -116,7 +118,7 @@ st.sidebar.markdown("---")
 st.sidebar.markdown(f"**System Name:** {pws_info['PWS_NAME']}")
 st.sidebar.markdown(f"**PWSID:** {pws_info['PWSID']}")
 st.sidebar.markdown(f"**Location:** {pws_info['CITY_NAME']}, GA")
-st.sidebar.markdown(f"**Population Served:** {pws_info['POPULATION_SERVED_COUNT']:,}")
+st.sidebar.markdown(f"**Population Served:** {int(pws_info['POPULATION_SERVED_COUNT']):,}")
 st.sidebar.markdown(f"**System Type:** {get_code_description('PWS_TYPE_CODE', pws_info['PWS_TYPE_CODE'])}")
 st.sidebar.markdown("---")
 
@@ -131,111 +133,81 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 
 # --- Tab 1: Water Quality & Safety ---
 with tab1:
-    st.header(f"Water Quality & Safety for: {pws_info['PWS_NAME']}")
+    st.header(f"Historical Violation Timeline for: {pws_info['PWS_NAME']}")
     st.markdown(
-        "Review recent contaminant violations and lead/copper sample results. *Note: This data is a snapshot for Q1 2025 and does not represent a full historical record.*")
+        "This Gantt chart shows the duration of non-compliance for each violation. Hover over bars for details.")
 
-    # Filter data for selected PWS
-    violations_df = data['SDWA_VIOLATIONS_ENFORCEMENT']
-    pws_violations = violations_df[violations_df['PWSID'] == selected_pwsid]
+    # --- Data Preparation for Gantt Chart ---
+    pws_violations = data['SDWA_VIOLATIONS_ENFORCEMENT'][
+        data['SDWA_VIOLATIONS_ENFORCEMENT']['PWSID'] == selected_pwsid].copy()
+    pws_violations['Start'] = pd.to_datetime(pws_violations['NON_COMPL_PER_BEGIN_DATE'], errors='coerce')
 
-    st.subheader("Recent Violations")
-    if pws_violations.empty:
-        st.success("No recent violations found for this water system in the Q1 2025 data.")
+    # For ongoing violations, set end date to the most recent start date in the data to keep the timeline relevant
+    latest_date = pws_violations['Start'].max()
+    if pd.isna(latest_date):
+        latest_date = pd.Timestamp.now()  # Fallback if no dates exist
+
+    pws_violations['Finish'] = pd.to_datetime(pws_violations['NON_COMPL_PER_END_DATE'], errors='coerce').fillna(
+        latest_date)
+    pws_violations.dropna(subset=['Start', 'Finish'], inplace=True)
+
+    gantt_data = []
+    if not pws_violations.empty:
+        pws_violations['Task'] = pws_violations['CONTAMINANT_CODE'].apply(
+            lambda x: get_code_description('CONTAMINANT_CODE', str(int(x))))
+        pws_violations['Resource'] = np.where(pws_violations['IS_HEALTH_BASED_IND'] == 'Y', 'Health-Based',
+                                              'Non-Health-Based')
+        gantt_data = pws_violations[['Task', 'Start', 'Finish', 'Resource']].to_dict('records')
+
+    if not gantt_data:
+        st.info("No historical violations found in this dataset for the selected water system.")
     else:
-        # Create a more readable violations dataframe
-        display_violations = pws_violations.copy()
-        display_violations['Contaminant'] = display_violations['CONTAMINANT_CODE'].apply(
-            lambda x: get_code_description('CONTAMINANT_CODE', x))
-        display_violations['Violation Type'] = display_violations['VIOLATION_CODE'].apply(
-            lambda x: get_code_description('VIOLATION_CODE', x))
+        # --- Gantt Chart ---
+        colors = {'Health-Based': 'rgb(217, 83, 79)', 'Non-Health-Based': 'rgb(240, 173, 78)'}
 
-        st.info(f"Found {len(display_violations)} violation(s) for this system.")
+        fig = ff.create_gantt(gantt_data,
+                              colors=colors,
+                              index_col='Resource',
+                              show_colorbar=True,
+                              group_tasks=True,
+                              title='Violation Timeline by Type')
 
-        for index, row in display_violations.iterrows():
-            is_health_based = row['IS_HEALTH_BASED_IND'] == 'Y'
+        fig.update_layout(xaxis_title='Date', yaxis_title='Contaminant / Rule')
+        st.plotly_chart(fig, use_container_width=True)
 
-            if is_health_based:
-                st.error(f"**Health-Based Violation:** {row['Violation Type']} for **{row['Contaminant']}**", icon="⚠️")
-            else:
-                st.warning(f"**Non-Health-Based Violation:** {row['Violation Type']} for **{row['Contaminant']}**",
-                           icon="📋")
+    # --- LCR and Details Table ---
+    st.markdown("### Compliance Event Details")
+    pws_lcr = data['SDWA_LCR_SAMPLES'][data['SDWA_LCR_SAMPLES']['PWSID'] == selected_pwsid].copy()
 
-            # Displaying violation details
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown(f"**Status:** `{row['VIOLATION_STATUS']}`")
-                st.markdown(
-                    f"**Non-Compliance Period:** {row['NON_COMPL_PER_BEGIN_DATE']} to {row['NON_COMPL_PER_END_DATE'] if pd.notna(row['NON_COMPL_PER_END_DATE']) else 'Ongoing'}")
+    # Prepare violation data for the table
+    violations_table = pws_violations.copy()
+    violations_table['Date'] = violations_table['Start']
+    violations_table['Event Type'] = 'Violation'
+    violations_table['Details'] = "Violation: " + violations_table['VIOLATION_CODE'].apply(
+        lambda x: get_code_description('VIOLATION_CODE', x)) + " | Status: " + violations_table[
+                                      'VIOLATION_STATUS'].astype(str)
+    violations_table['Health Based'] = violations_table['Resource']
 
-            # Check if there's a measured value to plot
-            viol_measure = pd.to_numeric(row['VIOL_MEASURE'], errors='coerce')
-            federal_mcl = pd.to_numeric(row['FEDERAL_MCL'], errors='coerce')
+    # Prepare LCR data for the table
+    pws_lcr['Date'] = pd.to_datetime(pws_lcr['SAMPLING_END_DATE'], errors='coerce')
+    pws_lcr.dropna(subset=['Date'], inplace=True)
+    pws_lcr['Event Type'] = 'LCR Sample'
+    pws_lcr['Contaminant'] = pws_lcr['CONTAMINANT_CODE'].apply(lambda x: get_code_description('CONTAMINANT_CODE', x))
+    pws_lcr['Details'] = "90th Percentile Result: " + pws_lcr['SAMPLE_MEASURE'].astype(str) + " " + pws_lcr[
+        'UNIT_OF_MEASURE'].astype(str)
+    pws_lcr['Health Based'] = 'N/A'  # LCR samples are not violations themselves
 
-            with col2:
-                if pd.notna(viol_measure):
-                    st.markdown(f"**Measured Value:** {viol_measure} {row['UNIT_OF_MEASURE']}")
-                    if pd.notna(federal_mcl):
-                        st.markdown(f"**Legal Limit (MCL):** {federal_mcl} {row['UNIT_OF_MEASURE']}")
-                    else:
-                        st.markdown(f"**Legal Limit (MCL):** Not specified")
-                else:
-                    st.markdown("No specific measurement recorded for this violation.")
+    # Combine for a unified table
+    details_data = pd.concat([
+        violations_table[['Date', 'Event Type', 'Task', 'Details', 'Health Based']].rename(
+            columns={'Task': 'Contaminant'}),
+        pws_lcr[['Date', 'Event Type', 'Contaminant', 'Details', 'Health Based']]
+    ], ignore_index=True)
 
-            # Create a comparison chart if we have both values
-            if pd.notna(viol_measure) and pd.notna(federal_mcl):
-                chart_data = pd.DataFrame({
-                    'Category': ['Measured Value', 'Legal Limit (MCL)'],
-                    'Value': [viol_measure, federal_mcl],
-                    'Color': ['#d9534f', '#5cb85c']  # red, green
-                })
-
-                chart = alt.Chart(chart_data).mark_bar().encode(
-                    x=alt.X('Value:Q', title=f"Measurement ({row['UNIT_OF_MEASURE']})"),
-                    y=alt.Y('Category:N', title=None, sort='-x'),
-                    color=alt.Color('Category:N', scale=alt.Scale(domain=['Measured Value', 'Legal Limit (MCL)'],
-                                                                  range=['#d9534f', '#5cb85c']), legend=None),
-                    tooltip=['Category', 'Value']
-                ).properties(
-                    title=f"Violation Measurement vs. Legal Limit for {row['Contaminant']}"
-                )
-                st.altair_chart(chart, use_container_width=True)
-
-            st.markdown("---")
-
-    st.subheader("Lead and Copper Rule (LCR) Sample Results")
-    lcr_df = data.get('SDWA_LCR_SAMPLES', pd.DataFrame())
-    pws_lcr = lcr_df[lcr_df['PWSID'] == selected_pwsid]
-
-    if pws_lcr.empty:
-        st.info("No Lead and Copper Rule sample data found for this system in Q1 2025.")
+    if details_data.empty:
+        st.info("No detailed compliance events to display.")
     else:
-        lead_result = pws_lcr[pws_lcr['CONTAMINANT_CODE'].astype(str) == '1030']
-        copper_result = pws_lcr[pws_lcr['CONTAMINANT_CODE'].astype(str) == '1022']
-
-        lead_val = lead_result['SAMPLE_MEASURE'].iloc[0] if not lead_result.empty else 0
-        copper_val = copper_result['SAMPLE_MEASURE'].iloc[0] if not copper_result.empty else 0
-
-        # Data for plotting
-        lcr_plot_data = pd.DataFrame([
-            {'Contaminant': 'Lead', 'Type': 'Measured 90th Percentile', 'Value': lead_val},
-            {'Contaminant': 'Lead', 'Type': 'EPA Action Level', 'Value': 0.015},
-            {'Contaminant': 'Copper', 'Type': 'Measured 90th Percentile', 'Value': copper_val},
-            {'Contaminant': 'Copper', 'Type': 'EPA Action Level', 'Value': 1.3}
-        ])
-
-        # Create the chart
-        lcr_chart = alt.Chart(lcr_plot_data).mark_bar().encode(
-            x=alt.X('Type:N', title=None, axis=alt.Axis(labels=False)),
-            y=alt.Y('Value:Q', title="Result (mg/L)"),
-            color='Type:N',
-            column=alt.Column('Contaminant:N', title="Contaminant")
-        ).properties(
-            title='Lead & Copper Results vs. EPA Action Levels'
-        )
-        st.altair_chart(lcr_chart, use_container_width=True)
-        st.caption(
-            f"Samples taken during monitoring period ending {pws_lcr['SAMPLING_END_DATE'].iloc[0]}. Action levels are triggers for additional treatment requirements, not direct violations.")
+        st.dataframe(details_data.sort_values(by='Date', ascending=False), use_container_width=True)
 
 # --- Tab 2: System Performance ---
 with tab2:
@@ -249,16 +221,16 @@ with tab2:
     # Report Card Metrics
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Total Violations (Q1 2025)", value=len(pws_violations))
+        st.metric("Total Violations (in this dataset)", value=len(pws_violations))
     with col2:
         st.metric("Health-Based Violations", value=len(pws_violations[pws_violations['IS_HEALTH_BASED_IND'] == 'Y']))
     with col3:
-        st.metric("Site Visits (Q1 2025)", value=len(pws_visits))
+        st.metric("Site Visits (in this dataset)", value=len(pws_visits))
 
     st.subheader("Enforcement Actions")
     pws_enforcement = pws_violations[pws_violations['ENFORCEMENT_ID'].notna()]
     if pws_enforcement.empty:
-        st.success("No enforcement actions found for this system in Q1 2025.")
+        st.success("No enforcement actions found for this system in this dataset.")
     else:
         display_enforcement = pws_enforcement.copy()
         display_enforcement['Action Type'] = display_enforcement['ENFORCEMENT_ACTION_TYPE_CODE'].apply(
@@ -270,7 +242,7 @@ with tab2:
 
     st.subheader("Site Visits & Inspections")
     if pws_visits.empty:
-        st.info("No site visits recorded for this system in Q1 2025.")
+        st.info("No site visits recorded for this system in this dataset.")
     else:
         display_visits = pws_visits.copy()
         display_visits['Reason'] = display_visits['VISIT_REASON_CODE'].apply(
@@ -289,7 +261,7 @@ with tab3:
     primary_source_code = pws_info['PRIMARY_SOURCE_CODE']
     primary_source_desc = get_code_description('PRIMARY_SOURCE_CODE', primary_source_code)
 
-    st.info(f"**Primary Water Source:** {primary_source_desc} (`{primary_source_code}`)", icon="🚰")
+    st.info(f"**Primary Water Source:** {primary_source_desc} (`{primary_source_code}`)", icon="💦")
 
     pws_facilities = data['SDWA_FACILITIES'][data['SDWA_FACILITIES']['PWSID'] == selected_pwsid]
     source_facilities = pws_facilities[pws_facilities['IS_SOURCE_IND'] == 'Y']
@@ -371,47 +343,19 @@ with tab5:
     readme_content = """
     # Data
 
-    **Across 10 CSV files, this directory includes a full Q1 2025 export of the SDWIS for the state of Georgia.** This README includes information on the File Structure, a Data Dictionary, as well as some (potentially) helpful external links at the bottom. 
+    **This dashboard uses the national Safe Drinking Water Information System (SDWIS) data.** This data includes information on public water systems, including monitoring, enforcement, and violation data related to requirements established by the Safe Drinking Water Act (SDWA). 
+
+    The data is a **snapshot** and contains historical records present in the database at the time of export. The date of a violation is found in the timeline, not necessarily the quarter of the export.
 
     ---
 
-    ## 💾 About the SDWIS
-    The Safe Drinking Water Information System (SDWIS) contains information on public water systems, including monitoring, enforcement, and violation data related to requirements established by the Safe Drinking Water Act (SDWA). 
-
-    ---
-
-    ## 🗄️ File Structure
-    Key fields for each table are listed in bold below. Key fields uniquely identify the records within each file, and may be used to join and relate data between files.
-
-    *This section has been abridged for the dashboard. The full data dictionary provides detailed column descriptions.*
-
+    ## 🗄️ Key Data Files Used
     - **SDWA_PUB_WATER_SYSTEMS.csv**: Core information about each public water system (PWS).
-    - **SDWA_VIOLATIONS_ENFORCEMENT.csv**: Details on violations and associated enforcement actions.
+    - **SDWA_VIOLATIONS_ENFORCEMENT.csv**: Details on violations, which form the basis of the timeline.
     - **SDWA_LCR_SAMPLES.csv**: Lead and Copper Rule 90th-percentile sample results.
     - **SDWA_SITE_VISITS.csv**: Records of inspections and sanitary surveys.
-    - **SDWA_FACILITIES.csv**: Information on physical facilities like treatment plants and wells.
     - **SDWA_GEOGRAPHIC_AREAS.csv**: Links water systems to the cities and counties they serve.
-    - **SDWA_REF_CODE_VALUES.csv**: A reference table to look up descriptions for various codes.
-    - ... and other supplementary files.
-
-    ---
-
-    ## 📘 Data Element Dictionary
-    The following is a list of the data elements and SDWIS-derived elements that appear in the ECHO SDWA download. The data elements are listed alphabetically by data element name.
-
-    *Abridged for brevity. The original document contains over 100 field definitions.*
-
-    **PWSID** - A unique identifying code for a public water system in SDWIS. The PWSID consists of a two-letter state or region code, followed by seven digits.
-
-    **PWS_NAME** - Name of the public water system.
-
-    **VIOLATION_CODE** - A code value that represents a contaminant for which a public water system has incurred a violation of a primary drinking water regulation.
-
-    **CONTAMINANT_CODE** - A code value that represents a contaminant for which a public water system has incurred a violation of a primary drinking water regulation.
-
-    **IS_HEALTH_BASED_IND** - Indicates if this is a health based violation. Valid values are Y (yes) or N (no).
-
-    **ENFORCEMENT_ACTION_TYPE_CODE** - A designated attribute which indicates the coded type of enforcement follow up action was taken by a federal or state agency.
+    - **SDWA_REF_CODE_VALUES.csv**: A reference table to look up descriptions for various codes (e.g., Contaminant Names).
 
     ---
 
@@ -421,4 +365,3 @@ with tab5:
     - [SDWIS Search User Guide](https://www.epa.gov/enviro/sdwis-search-user-guide)
     """
     st.markdown(readme_content)
-
