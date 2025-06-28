@@ -129,9 +129,11 @@
                         Finish: finishDate.toISOString().split('T')[0],
                         Resource: v.IS_HEALTH_BASED_IND === 'Y' ? 'Health-Based' : 'Non-Health-Based',
                         Details: CODES_MAP.get(`VIOLATION_CODE|${v.VIOLATION_CODE}`) || 'No details',
-                        measuredValue: v.MCL_VIOL_MEASURE,
-                        limitValue: v.MCL_VIOL_MCL_VALUE,
-                        unit: v.MCL_VIOL_MCL_UOM
+                        // *** THIS IS THE FIX ***
+                        // Use the correct column names from the CSV file.
+                        measuredValue: v.RESULT,
+                        limitValue: v.MCL_VALUE,
+                        unit: v.UNIT_OF_MEASURE
                     };
                 }
                 return null;
@@ -142,21 +144,18 @@
 
                 const plotData = [];
                 ganttData.forEach(d => {
+                    // Rebuild the tooltip text with the corrected data fields.
                     let tooltipText = `<b>${d.FullTask}</b><br>Type: ${d.Details}<br>Period: ${d.Start} to ${d.Finish}<br>Classification: ${d.Resource}`;
                     if (d.measuredValue && d.limitValue) {
                         tooltipText += `<br><br><b>Result: ${d.measuredValue} ${d.unit || ''}</b><br>Limit: ${d.limitValue} ${d.unit || ''}`;
                     }
 
-                    // The dark border trace
                     plotData.push({
                         x: [d.Start, d.Finish], y: [d.Task, d.Task],
                         mode: 'lines', type: 'scatter', showlegend: false,
                         line: { color: '#333333', width: 22 },
-                        // *** THIS IS THE FIX ***
-                        // 'skip' makes this layer invisible to the mouse hover engine.
                         hoverinfo: 'skip'
                     });
-                    // The main colored fill trace
                     plotData.push({
                         x: [d.Start, d.Finish], y: [d.Task, d.Task],
                         mode: 'lines', type: 'scatter', showlegend: false,

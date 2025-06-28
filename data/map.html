@@ -73,13 +73,11 @@
             return fetch(url)
                 .then(response => {
                     if (!response.ok) {
-                        // If the file is not found, throw a specific error
                         throw new Error(`File not found: ${url}. Make sure it's in the same folder as the HTML file and named correctly.`);
                     }
                     return response.text();
                 })
                 .then(csvText => {
-                    // PapaParse the text content of the file
                     return new Promise((resolve, reject) => {
                         Papa.parse(csvText, {
                             header: true,
@@ -107,16 +105,13 @@
                 statusMessage.textContent = `Fetching ${FILES.zips}...`;
                 const zipPromise = fetchAndParseCSV(FILES.zips);
 
-                // Wait for all files to be fetched and parsed
                 const [violationsData, systemsData, zipCodeData] = await Promise.all([violationsPromise, systemsPromise, zipPromise]);
 
                 // --- 2. Data Transformation ---
                 statusMessage.textContent = 'Calculating violation density...';
                 const violationCounts = violationsData.reduce((acc, record) => {
                     const pwsid = record.PWSID;
-                    if (pwsid) {
-                        acc[pwsid] = (acc[pwsid] || 0) + 1;
-                    }
+                    if (pwsid) acc[pwsid] = (acc[pwsid] || 0) + 1;
                     return acc;
                 }, {});
 
@@ -125,34 +120,30 @@
                     const zip = record.zip || record.ZIP;
                     const lat = record.latitude || record.lat;
                     const lon = record.longitude || record.lng || record.lon;
-                    if (zip && lat && lon) {
-                        acc[zip] = { lat: parseFloat(lat), lon: parseFloat(lon) };
-                    }
+                    if (zip && lat && lon) acc[zip] = { lat: parseFloat(lat), lon: parseFloat(lon) };
                     return acc;
                 }, {});
 
                 statusMessage.textContent = 'Joining datasets...';
-                const systemsWithViolations = systemsData
-                    .map(system => {
-                        const pwsid = system.PWSID;
-                        const zip = system.ZIP_CODE ? system.ZIP_CODE.substring(0, 5) : null;
-                        const coords = zip ? zipCoords[zip] : null;
+                const systemsWithViolations = systemsData.map(system => {
+                    const pwsid = system.PWSID;
+                    const zip = system.ZIP_CODE ? system.ZIP_CODE.substring(0, 5) : null;
+                    const coords = zip ? zipCoords[zip] : null;
 
-                        if (pwsid && zip && coords) {
-                            return {
-                                pwsid: pwsid,
-                                name: system.PWS_NAME || 'N/A',
-                                city: system.CITY_NAME || 'N/A',
-                                zip: zip,
-                                population: system.POPULATION_SERVED_COUNT || 0,
-                                violationCount: violationCounts[pwsid] || 0,
-                                lat: coords.lat,
-                                lon: coords.lon
-                            };
-                        }
-                        return null;
-                    })
-                    .filter(Boolean);
+                    if (pwsid && zip && coords) {
+                        return {
+                            pwsid: pwsid,
+                            name: system.PWS_NAME || 'N/A',
+                            city: system.CITY_NAME || 'N/A',
+                            zip: zip,
+                            population: system.POPULATION_SERVED_COUNT || 0,
+                            violationCount: violationCounts[pwsid] || 0,
+                            lat: coords.lat,
+                            lon: coords.lon
+                        };
+                    }
+                    return null;
+                }).filter(Boolean);
 
                 const systemsInGeorgia = systemsWithViolations.filter(sys => sys.pwsid.startsWith('GA'));
 
@@ -160,17 +151,18 @@
                      throw new Error("No valid Georgia water systems with location data could be processed. Please check the contents of your files.");
                 }
 
-                // --- 3. Map Generation ---
+                // --- 3. UI and Map Generation (FIXED ORDER) ---
                 statusMessage.textContent = `Plotting ${systemsInGeorgia.length} water systems on the map...`;
-                displayMap(systemsInGeorgia);
 
-                // --- 4. Final UI Updates ---
+                // **FIX:** First, hide the status and show the map container.
                 statusSection.classList.add('hidden');
                 mapContainer.classList.remove('hidden');
 
+                // **FIX:** Now, display the map in the visible container.
+                displayMap(systemsInGeorgia);
+
             } catch (error) {
                 console.error("An error occurred:", error);
-                // Display a user-friendly error message
                 statusSection.innerHTML = `
                     <div class="text-center text-red-600 bg-red-50 p-4 rounded-lg border border-red-200">
                         <h3 class="font-bold text-xl mb-2">Error Loading Data</h3>
@@ -245,6 +237,12 @@
                 return div;
             };
             legend.addTo(map);
+
+            // **FIX:** Tell the map to re-evaluate its size after it's been rendered
+            // A short timeout ensures the browser has finished its layout calculations.
+            setTimeout(() => {
+                map.invalidateSize();
+            }, 10);
         }
 
         // --- Event Listener ---
@@ -254,3 +252,4 @@
     </script>
 </body>
 </html>
+
