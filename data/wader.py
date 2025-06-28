@@ -142,10 +142,9 @@ with tab1:
         data['SDWA_VIOLATIONS_ENFORCEMENT']['PWSID'] == selected_pwsid].copy()
     pws_violations['Start'] = pd.to_datetime(pws_violations['NON_COMPL_PER_BEGIN_DATE'], errors='coerce')
 
-    # For ongoing violations, set end date to the most recent start date in the data to keep the timeline relevant
     latest_date = pws_violations['Start'].max()
     if pd.isna(latest_date):
-        latest_date = pd.Timestamp.now()  # Fallback if no dates exist
+        latest_date = pd.Timestamp.now()
 
     pws_violations['Finish'] = pd.to_datetime(pws_violations['NON_COMPL_PER_END_DATE'], errors='coerce').fillna(
         latest_date)
@@ -172,6 +171,31 @@ with tab1:
                               group_tasks=True,
                               title='Violation Timeline by Type')
 
+        # --- Add Annotations ---
+        annotations = []
+        for index, row in pws_violations.iterrows():
+            viol_measure = pd.to_numeric(row.get('VIOL_MEASURE'), errors='coerce')
+            federal_mcl = pd.to_numeric(row.get('FEDERAL_MCL'), errors='coerce')
+
+            if pd.notna(viol_measure):
+                # Build annotation text
+                annotation_text = f"Value: {viol_measure:.3f}"
+                if pd.notna(federal_mcl):
+                    annotation_text += f" (Limit: {federal_mcl})"
+
+                # Calculate position for the annotation
+                midpoint_date = row['Start'] + (row['Finish'] - row['Start']) / 2
+
+                # Add annotation to the figure
+                fig.add_annotation(
+                    x=midpoint_date,
+                    y=row['Task'],
+                    text=annotation_text,
+                    showarrow=False,
+                    font=dict(color='white', size=10),
+                    align='center'
+                )
+
         fig.update_layout(xaxis_title='Date', yaxis_title='Contaminant / Rule')
         st.plotly_chart(fig, use_container_width=True)
 
@@ -189,19 +213,24 @@ with tab1:
     violations_table['Health Based'] = violations_table['Resource']
 
     # Prepare LCR data for the table
-    pws_lcr['Date'] = pd.to_datetime(pws_lcr['SAMPLING_END_DATE'], errors='coerce')
-    pws_lcr.dropna(subset=['Date'], inplace=True)
-    pws_lcr['Event Type'] = 'LCR Sample'
-    pws_lcr['Contaminant'] = pws_lcr['CONTAMINANT_CODE'].apply(lambda x: get_code_description('CONTAMINANT_CODE', x))
-    pws_lcr['Details'] = "90th Percentile Result: " + pws_lcr['SAMPLE_MEASURE'].astype(str) + " " + pws_lcr[
-        'UNIT_OF_MEASURE'].astype(str)
-    pws_lcr['Health Based'] = 'N/A'  # LCR samples are not violations themselves
+    if not pws_lcr.empty:
+        pws_lcr['Date'] = pd.to_datetime(pws_lcr['SAMPLING_END_DATE'], errors='coerce')
+        pws_lcr.dropna(subset=['Date'], inplace=True)
+        pws_lcr['Event Type'] = 'LCR Sample'
+        pws_lcr['Contaminant'] = pws_lcr['CONTAMINANT_CODE'].apply(
+            lambda x: get_code_description('CONTAMINANT_CODE', str(x)))
+        pws_lcr['Details'] = "90th Percentile Result: " + pws_lcr['SAMPLE_MEASURE'].astype(str) + " " + pws_lcr[
+            'UNIT_OF_MEASURE'].astype(str)
+        pws_lcr['Health Based'] = 'N/A'
+    else:
+        pws_lcr = pd.DataFrame()
 
     # Combine for a unified table
     details_data = pd.concat([
         violations_table[['Date', 'Event Type', 'Task', 'Details', 'Health Based']].rename(
             columns={'Task': 'Contaminant'}),
-        pws_lcr[['Date', 'Event Type', 'Contaminant', 'Details', 'Health Based']]
+        pws_lcr[
+            ['Date', 'Event Type', 'Contaminant', 'Details', 'Health Based']] if not pws_lcr.empty else pd.DataFrame()
     ], ignore_index=True)
 
     if details_data.empty:
@@ -215,20 +244,22 @@ with tab2:
     st.markdown("A summary of compliance status, enforcement actions, and recent site visits.")
 
     # Data for selected PWS
-    pws_violations = data['SDWA_VIOLATIONS_ENFORCEMENT'][data['SDWA_VIOLATIONS_ENFORCEMENT']['PWSID'] == selected_pwsid]
+    pws_violations_perf = data['SDWA_VIOLATIONS_ENFORCEMENT'][
+        data['SDWA_VIOLATIONS_ENFORCEMENT']['PWSID'] == selected_pwsid]
     pws_visits = data['SDWA_SITE_VISITS'][data['SDWA_SITE_VISITS']['PWSID'] == selected_pwsid]
 
     # Report Card Metrics
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Total Violations (in this dataset)", value=len(pws_violations))
+        st.metric("Total Violations (in this dataset)", value=len(pws_violations_perf))
     with col2:
-        st.metric("Health-Based Violations", value=len(pws_violations[pws_violations['IS_HEALTH_BASED_IND'] == 'Y']))
+        st.metric("Health-Based Violations",
+                  value=len(pws_violations_perf[pws_violations_perf['IS_HEALTH_BASED_IND'] == 'Y']))
     with col3:
         st.metric("Site Visits (in this dataset)", value=len(pws_visits))
 
     st.subheader("Enforcement Actions")
-    pws_enforcement = pws_violations[pws_violations['ENFORCEMENT_ID'].notna()]
+    pws_enforcement = pws_violations_perf[pws_violations_perf['ENFORCEMENT_ID'].notna()]
     if pws_enforcement.empty:
         st.success("No enforcement actions found for this system in this dataset.")
     else:
@@ -261,7 +292,7 @@ with tab3:
     primary_source_code = pws_info['PRIMARY_SOURCE_CODE']
     primary_source_desc = get_code_description('PRIMARY_SOURCE_CODE', primary_source_code)
 
-    st.info(f"**Primary Water Source:** {primary_source_desc} (`{primary_source_code}`)", icon="💦")
+    st.info(f"**Primary Water Source:** {primary_source_desc} (`{primary_source_code}`)", icon="🚰")
 
     pws_facilities = data['SDWA_FACILITIES'][data['SDWA_FACILITIES']['PWSID'] == selected_pwsid]
     source_facilities = pws_facilities[pws_facilities['IS_SOURCE_IND'] == 'Y']
