@@ -35,7 +35,7 @@
             <p class="text-lg text-gray-600 mt-2">Violation Density Map (Q1 2025)</p>
         </div>
 
-        <!-- Status & Loader Section (replaces upload) -->
+        <!-- Status & Loader Section -->
         <div id="status-section" class="loader-container">
             <div class="loader"></div>
             <p id="status-message" class="text-gray-600 text-lg mt-4">Loading data files...</p>
@@ -64,54 +64,36 @@
             zips: 'zipCodeToLatLong.csv'
         };
 
-        /**
-         * Fetches a local CSV file, then parses it using PapaParse.
-         * @param {string} url The path to the local CSV file.
-         * @returns {Promise<Array<Object>>} A promise that resolves with the parsed data.
-         */
         function fetchAndParseCSV(url) {
             return fetch(url)
                 .then(response => {
-                    if (!response.ok) {
-                        throw new Error(`File not found: ${url}. Make sure it's in the same folder as the HTML file and named correctly.`);
-                    }
+                    if (!response.ok) throw new Error(`File not found: ${url}. Make sure it's in the same folder as the HTML file and named correctly.`);
                     return response.text();
                 })
-                .then(csvText => {
-                    return new Promise((resolve, reject) => {
-                        Papa.parse(csvText, {
-                            header: true,
-                            skipEmptyLines: true,
-                            complete: (results) => resolve(results.data),
-                            error: (error) => reject(error)
-                        });
+                .then(csvText => new Promise((resolve, reject) => {
+                    Papa.parse(csvText, {
+                        header: true,
+                        skipEmptyLines: true,
+                        complete: (results) => resolve(results.data),
+                        error: (error) => reject(error)
                     });
-                });
+                }));
         }
 
-        /**
-         * Main function to process files and generate the map.
-         * This function is now called automatically when the page loads.
-         */
         async function processAndMapData() {
             try {
-                // --- 1. Data Loading and Parsing ---
-                statusMessage.textContent = `Fetching ${FILES.violations}...`;
-                const violationsPromise = fetchAndParseCSV(FILES.violations);
-
-                statusMessage.textContent = `Fetching ${FILES.systems}...`;
-                const systemsPromise = fetchAndParseCSV(FILES.systems);
-
-                statusMessage.textContent = `Fetching ${FILES.zips}...`;
-                const zipPromise = fetchAndParseCSV(FILES.zips);
-
-                const [violationsData, systemsData, zipCodeData] = await Promise.all([violationsPromise, systemsPromise, zipPromise]);
+                // --- 1. Data Loading ---
+                statusMessage.textContent = `Fetching CSV files...`;
+                const [violationsData, systemsData, zipCodeData] = await Promise.all([
+                    fetchAndParseCSV(FILES.violations),
+                    fetchAndParseCSV(FILES.systems),
+                    fetchAndParseCSV(FILES.zips)
+                ]);
 
                 // --- 2. Data Transformation ---
                 statusMessage.textContent = 'Calculating violation density...';
                 const violationCounts = violationsData.reduce((acc, record) => {
-                    const pwsid = record.PWSID;
-                    if (pwsid) acc[pwsid] = (acc[pwsid] || 0) + 1;
+                    if (record.PWSID) acc[record.PWSID] = (acc[record.PWSID] || 0) + 1;
                     return acc;
                 }, {});
 
@@ -148,18 +130,31 @@
                 const systemsInGeorgia = systemsWithViolations.filter(sys => sys.pwsid.startsWith('GA'));
 
                 if (systemsInGeorgia.length === 0) {
-                     throw new Error("No valid Georgia water systems with location data could be processed. Please check the contents of your files.");
+                     throw new Error("No valid Georgia water systems with location data could be processed. Please check file contents.");
                 }
 
-                // --- 3. UI and Map Generation (FIXED ORDER) ---
-                statusMessage.textContent = `Plotting ${systemsInGeorgia.length} water systems on the map...`;
+                // --- 3. DYNAMIC THRESHOLD CALCULATION ---
+                statusMessage.textContent = 'Calculating dynamic color scale...';
+                const sortedSystems = [...systemsInGeorgia].sort((a, b) => b.violationCount - a.violationCount);
 
-                // **FIX:** First, hide the status and show the map container.
+                // The 10th system (index 9) sets the minimum for the "red" category.
+                // Provide fallbacks in case there are fewer than 10 systems.
+                const redThreshold = sortedSystems.length > 9 ? sortedSystems[9].violationCount : (sortedSystems[0]?.violationCount || 20);
+
+                // Ensure thresholds are at least 1 to prevent all-zero counts from breaking the scale.
+                const finalRedThreshold = Math.max(1, redThreshold);
+
+                const dynamicThresholds = {
+                    red: finalRedThreshold,
+                    orange: Math.ceil(finalRedThreshold * 0.5),
+                    yellow: Math.ceil(finalRedThreshold * 0.2),
+                };
+
+                // --- 4. UI and Map Generation ---
+                statusMessage.textContent = `Plotting ${systemsInGeorgia.length} water systems...`;
                 statusSection.classList.add('hidden');
                 mapContainer.classList.remove('hidden');
-
-                // **FIX:** Now, display the map in the visible container.
-                displayMap(systemsInGeorgia);
+                displayMap(systemsInGeorgia, dynamicThresholds);
 
             } catch (error) {
                 console.error("An error occurred:", error);
@@ -167,7 +162,7 @@
                     <div class="text-center text-red-600 bg-red-50 p-4 rounded-lg border border-red-200">
                         <h3 class="font-bold text-xl mb-2">Error Loading Data</h3>
                         <p>${error.message}</p>
-                        <p class="mt-2 text-sm">Please ensure all three CSV files are in the same directory as this HTML file and are named correctly:</p>
+                        <p class="mt-2 text-sm">Please ensure all three CSV files are in the same directory as this HTML file and are named correctly.</p>
                         <ul class="list-disc list-inside mt-2 text-left font-mono text-sm mx-auto max-w-md">
                             <li>${FILES.systems}</li>
                             <li>${FILES.violations}</li>
@@ -179,20 +174,20 @@
         }
 
         /**
-         * Determines marker color based on violation count
+         * Determines marker color based on DYNAMIC violation count thresholds.
          */
-        function getMarkerColor(count) {
-            if (count > 20) return '#d73027'; // Dark Red
-            if (count > 10) return '#f46d43'; // Orange
-            if (count > 5) return '#fdae61';  // Light Orange
-            if (count > 0) return '#fee08b';   // Yellow
-            return '#66c2a5'; // Greenish-blue (no violations)
+        function getMarkerColor(count, thresholds) {
+            if (count >= thresholds.red) return '#d73027';      // Red
+            if (count >= thresholds.orange) return '#f46d43';   // Orange
+            if (count >= thresholds.yellow) return '#fdae61';   // Light Orange
+            if (count > 0) return '#fee08b';                    // Yellow
+            return '#66c2a5';                                   // Greenish-blue (no violations)
         }
 
         /**
-         * Creates and displays the Leaflet map
+         * Creates and displays the Leaflet map with a dynamic legend.
          */
-        function displayMap(systems) {
+        function displayMap(systems, thresholds) {
             if (map) map.remove();
             map = L.map('map').setView([32.8407, -83.6324], 7); // Center of Georgia
 
@@ -203,7 +198,7 @@
             systems.forEach(system => {
                 const marker = L.circleMarker([system.lat, system.lon], {
                     radius: 7,
-                    fillColor: getMarkerColor(system.violationCount),
+                    fillColor: getMarkerColor(system.violationCount, thresholds),
                     color: "#000",
                     weight: 1,
                     opacity: 1,
@@ -226,30 +221,30 @@
             const legend = L.control({position: 'bottomright'});
             legend.onAdd = function (map) {
                 const div = L.DomUtil.create('div', 'info legend');
-                const grades = [0, 1, 6, 11, 21];
-                const labels = ['0', '1 - 5', '6 - 10', '11 - 20', '21+'];
+                // Use dynamic thresholds for the legend
+                const grades = [0, 1, thresholds.yellow, thresholds.orange, thresholds.red];
+                const labels = [
+                    '0 Violations',
+                    `1 - ${thresholds.yellow - 1}`,
+                    `${thresholds.yellow} - ${thresholds.orange - 1}`,
+                    `${thresholds.orange} - ${thresholds.red - 1}`,
+                    `${thresholds.red}+`
+                ];
                 div.innerHTML += '<h4 class="font-bold mb-1">Violation Density</h4>';
 
+                // Loop through intervals and generate a label with a colored square for each
                 for (let i = 0; i < grades.length; i++) {
-                    const color = getMarkerColor(grades[i]);
+                    const color = getMarkerColor(grades[i], thresholds);
                     div.innerHTML += `<i style="background:${color}"></i> ${labels[i]}<br>`;
                 }
                 return div;
             };
             legend.addTo(map);
 
-            // **FIX:** Tell the map to re-evaluate its size after it's been rendered
-            // A short timeout ensures the browser has finished its layout calculations.
-            setTimeout(() => {
-                map.invalidateSize();
-            }, 10);
+            setTimeout(() => map.invalidateSize(), 10);
         }
 
-        // --- Event Listener ---
-        // Automatically start the process when the page content is loaded
         document.addEventListener('DOMContentLoaded', processAndMapData);
-
     </script>
 </body>
 </html>
-
