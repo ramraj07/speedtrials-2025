@@ -60,23 +60,22 @@
             <div class="row align-items-end">
                 <div class="col-lg-5 col-md-6">
                     <div class="form-group">
-                        <label for="zip-search-input" class="search-label">1. Search by ZIP Code</label>
+                        <label for="zip-search-input" class="search-label">1. Go to ZIP Code on Map</label>
                         <div class="input-group">
                             <input type="text" class="form-control" id="zip-search-input" placeholder="Enter 5-digit ZIP">
                             <div class="input-group-append">
-                                <button class="btn btn-primary" type="button" id="zip-search-btn">Find Systems</button>
+                                <button class="btn btn-primary" type="button" id="zip-search-btn">Go</button>
                             </div>
                         </div>
                     </div>
                 </div>
-
                 <div class="col-lg-7 col-md-6">
                     <div class="form-group">
-                         <label for="pws-select" class="search-label">2. Select Water System</label>
+                         <label for="pws-select" class="search-label">2. Find System by Name/ID</label>
                          <div class="input-group">
                             <select id="pws-select" class="form-control" style="width: 85%;"></select>
                             <div class="input-group-append">
-                                <button class="btn btn-outline-secondary" type="button" id="reset-pws-list-btn" title="Reset List">Reset</button>
+                                <button class="btn btn-outline-secondary" type="button" id="reset-map-view-btn" title="Reset Map View">Reset View</button>
                             </div>
                          </div>
                     </div>
@@ -110,15 +109,15 @@
         // --- Global State ---
         let DATA_STORE = {};
         let CODES_MAP = new Map();
-        let ALL_SYSTEM_OPTIONS = []; // Holds the master list of all water systems
+        let ALL_SYSTEM_OPTIONS = [];
+        let GEOCODED_SYSTEMS = [];
+        let ZIP_COORDS = {};
         let map = null;
 
-        // --- DOM Elements ---
         const $loader = $('#loader');
         const $mapView = $('#map-view');
         const $dashboardView = $('#dashboard-view');
 
-        // --- Initial Data Load ---
         const filesToLoad = [
             "SDWA_VIOLATIONS_ENFORCEMENT.csv", "SDWA_PUB_WATER_SYSTEMS.csv", "SDWA_GEOGRAPHIC_AREAS.csv",
             "SDWA_REF_CODE_VALUES.csv", "SDWA_SITE_VISITS.csv", "SDWA_FACILITIES.csv", "zipCodeToLatLong.csv"
@@ -137,73 +136,71 @@
             $loader.fadeOut();
             $mapView.fadeIn('fast', () => { if (map) map.invalidateSize(); });
         }).catch(err => {
-            console.error("Error loading data:", err);
             $loader.html(`<div class="alert alert-danger" role="alert"><h4>Data Loading Failed</h4><p>${err.message}</p></div>`);
         });
 
         function initializeMainView() {
+            const systemsData = DATA_STORE['SDWA_PUB_WATER_SYSTEMS.csv'];
+            const zipCodeData = DATA_STORE['zipCodeToLatLong.csv'];
+
+            ZIP_COORDS = zipCodeData.reduce((acc, record) => {
+                const zip = record.zip || record.ZIP;
+                const lat = record.latitude || record.lat;
+                const lon = record.longitude || record.lng || record.lon;
+                if (zip && lat && lon) acc[zip] = { lat: parseFloat(lat), lon: parseFloat(lon) };
+                return acc;
+            }, {});
+
+            GEOCODED_SYSTEMS = systemsData.map(system => {
+                const zip = system.ZIP_CODE ? system.ZIP_CODE.substring(0, 5) : null;
+                const coords = zip ? ZIP_COORDS[zip] : null;
+                if (system.PWSID && coords) {
+                    return { pwsid: system.PWSID, name: system.PWS_NAME || 'N/A', lat: coords.lat, lon: coords.lon };
+                }
+                return null;
+            }).filter(Boolean);
+
             CODES_MAP = new Map(DATA_STORE["SDWA_REF_CODE_VALUES.csv"].map(d => [`${d.VALUE_TYPE}|${d.VALUE_CODE}`, d.VALUE_DESCRIPTION]));
-            const systems = new Map(DATA_STORE["SDWA_PUB_WATER_SYSTEMS.csv"].map(d => [d.PWSID, d]));
-            const geo = DATA_STORE["SDWA_GEOGRAPHIC_AREAS.csv"];
 
-            ALL_SYSTEM_OPTIONS = [...systems.values()]
+            ALL_SYSTEM_OPTIONS = systemsData
                 .filter(s => s.PWS_ACTIVITY_CODE === 'A' && s.PWS_NAME)
-                .map(s => ({
-                    id: s.PWSID,
-                    text: `${s.PWS_NAME} (${s.PWSID})`
-                }));
+                .map(s => ({ id: s.PWSID, text: `${s.PWS_NAME} (${s.PWSID})` }));
 
-            // Initial population of the Select2 dropdown
-            updatePwsDropdown(ALL_SYSTEM_OPTIONS);
-
-            $('#pws-select').on('select2:select', function (e) {
-                const pwsId = e.params.data.id;
-                if (pwsId) showDashboardView(pwsId);
+            $('#pws-select').select2({
+                data: ALL_SYSTEM_OPTIONS, placeholder: 'Search by name or PWSID...',
+                theme: "bootstrap", allowClear: true
+            }).on('select2:select', function (e) {
+                if (e.params.data.id) showDashboardView(e.params.data.id);
             });
 
             generateMapView();
         }
 
-        // --- NEW: Function to update the PWS dropdown ---
-        function updatePwsDropdown(options) {
-             $('#pws-select').empty().select2({
-                data: options,
-                placeholder: 'Select a water system...',
-                theme: "bootstrap",
-                allowClear: true
-            });
-        }
-
-        // --- NEW: ZIP Code Search Logic ---
         $('#zip-search-btn').on('click', function() {
             const zip = $('#zip-search-input').val().trim();
-            if (!zip || !/^\d{5}$/.test(zip)) {
+            if (!/^\d{5}$/.test(zip)) {
                 alert('Please enter a valid 5-digit ZIP code.');
                 return;
             }
 
-            const geoData = DATA_STORE["SDWA_GEOGRAPHIC_AREAS.csv"];
-            const matchingPwsIds = new Set(
-                geoData
-                    .filter(g => g.ZIP_CODE_SERVED === zip)
-                    .map(g => g.PWSID)
-            );
+            const targetCoords = ZIP_COORDS[zip];
 
-            const filteredOptions = ALL_SYSTEM_OPTIONS.filter(opt => matchingPwsIds.has(opt.id));
-
-            if (filteredOptions.length === 0) {
-                alert(`No water systems found serving ZIP code ${zip}.`);
+            if (targetCoords && map) {
+                // *** THIS IS THE CHANGED LINE ***
+                const zoomLevel = 11; // Changed from 12 to 11 to zoom out slightly.
+                map.setView([targetCoords.lat, targetCoords.lon], zoomLevel);
+            } else {
+                alert(`Location data for ZIP code ${zip} could not be found.`);
             }
-            updatePwsDropdown(filteredOptions);
         });
 
-        // --- NEW: Reset Button Logic ---
-        $('#reset-pws-list-btn').on('click', function() {
+        $('#reset-map-view-btn').on('click', function() {
             $('#zip-search-input').val('');
-            updatePwsDropdown(ALL_SYSTEM_OPTIONS);
+            if (map) {
+                map.setView([32.8407, -83.6324], 7);
+            }
         });
 
-        // --- View Switching Logic ---
         function showDashboardView(pwsId) {
             $mapView.fadeOut('fast', () => {
                 window.scrollTo(0, 0);
@@ -224,33 +221,14 @@
 
         $('#back-to-map').on('click', showMapView);
         $(document).on('click', '.view-details-btn', function() {
-            const pwsId = $(this).data('pwsid');
-            if (pwsId) showDashboardView(pwsId);
+            if ($(this).data('pwsid')) showDashboardView($(this).data('pwsid'));
         });
 
-        // --- MAP GENERATION AND OTHER FUNCTIONS (UNCHANGED FROM PREVIOUS VERSION) ---
         function generateMapView() {
-            const violationsData = DATA_STORE['SDWA_VIOLATIONS_ENFORCEMENT.csv'];
-            const systemsData = DATA_STORE['SDWA_PUB_WATER_SYSTEMS.csv'];
-            const zipCodeData = DATA_STORE['zipCodeToLatLong.csv'];
-            const violationCounts = violationsData.reduce((acc, record) => { if (record.PWSID) acc[record.PWSID] = (acc[record.PWSID] || 0) + 1; return acc; }, {});
-            const zipCoords = zipCodeData.reduce((acc, record) => {
-                const zip = record.zip || record.ZIP;
-                const lat = record.latitude || record.lat;
-                const lon = record.longitude || record.lng || record.lon;
-                if (zip && lat && lon) acc[zip] = { lat: parseFloat(lat), lon: parseFloat(lon) };
-                return acc;
-            }, {});
-            const systemsWithViolations = systemsData.map(system => {
-                const pwsid = system.PWSID;
-                const zip = system.ZIP_CODE ? system.ZIP_CODE.substring(0, 5) : null;
-                const coords = zip ? zipCoords[zip] : null;
-                if (pwsid && zip && coords) { return { pwsid: pwsid, name: system.PWS_NAME || 'N/A', city: system.CITY_NAME || 'N/A', zip: zip, population: system.POPULATION_SERVED_COUNT || 0, violationCount: violationCounts[pwsid] || 0, lat: coords.lat, lon: coords.lon }; }
-                return null;
-            }).filter(Boolean);
-            const systemsInGeorgia = systemsWithViolations.filter(sys => sys.pwsid.startsWith('GA'));
+            const violationCounts = DATA_STORE['SDWA_VIOLATIONS_ENFORCEMENT.csv'].reduce((acc, record) => { if (record.PWSID) acc[record.PWSID] = (acc[record.PWSID] || 0) + 1; return acc; }, {});
+            const systemsInGeorgia = GEOCODED_SYSTEMS.filter(sys => sys.pwsid.startsWith('GA')).map(sys => ({ ...sys, violationCount: violationCounts[sys.pwsid] || 0 }));
             if (systemsInGeorgia.length === 0) {
-                 $('#map').html('<div class="alert alert-warning">No valid Georgia water systems with location data could be processed.</div>');
+                 $('#map').html('<div class="alert alert-warning">No valid Georgia water systems could be mapped.</div>');
                  return;
             }
             const sortedSystems = [...systemsInGeorgia].sort((a, b) => b.violationCount - a.violationCount);
@@ -264,7 +242,7 @@
 
             systemsInGeorgia.forEach(system => {
                 const marker = L.circleMarker([system.lat, system.lon], { radius: 7, fillColor: getMarkerColor(system.violationCount, dynamicThresholds), color: "#000", weight: 1, opacity: 1, fillOpacity: 0.8 }).addTo(map);
-                const popupContent = `<div class="font-sans"><strong>${system.name}</strong><hr class="my-1"><strong>PWSID:</strong> ${system.pwsid}<br><strong>City:</strong> ${system.city}, ${system.zip}<br><strong style="color:${getMarkerColor(system.violationCount, dynamicThresholds)};">Violations: ${system.violationCount}</strong><button class="btn btn-primary btn-sm btn-block mt-2 view-details-btn" data-pwsid="${system.pwsid}">View Details</button></div>`;
+                const popupContent = `<div class="font-sans"><strong>${system.name}</strong><hr class="my-1"><strong>PWSID:</strong> ${system.pwsid}<br><strong style="color:${getMarkerColor(system.violationCount, dynamicThresholds)};">Violations: ${system.violationCount}</strong><button class="btn btn-primary btn-sm btn-block mt-2 view-details-btn" data-pwsid="${system.pwsid}">View Details</button></div>`;
                 marker.bindPopup(popupContent);
             });
 
@@ -281,10 +259,8 @@
         }
 
         function getMarkerColor(count, thresholds) {
-            if (count >= thresholds.red) return '#d73027';
-            if (count >= thresholds.orange) return '#f46d43';
-            if (count >= thresholds.yellow) return '#fdae61';
-            if (count > 0) return '#fee08b';
+            if (count >= thresholds.red) return '#d73027'; if (count >= thresholds.orange) return '#f46d43';
+            if (count >= thresholds.yellow) return '#fdae61'; if (count > 0) return '#fee08b';
             return '#66c2a5';
         }
 
