@@ -1,5 +1,7 @@
 import pandas as pd
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 import anthropic
 import os
 import json
@@ -8,6 +10,8 @@ from contextlib import asynccontextmanager
 from typing import Dict, Any
 
 # --- CONFIGURATION ---
+# The data is expected in a 'data' subdirectory.
+# The 'data' directory itself will also be served publicly.
 DATA_DIR = "./data"
 CACHE_FILE = "pws_summary_cache.json"
 
@@ -15,15 +19,15 @@ CACHE_FILE = "pws_summary_cache.json"
 # It is highly recommended to use environment variables for API keys
 client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", "YOUR_ANTHROPIC_API_KEY"))
 
-# --- GLOBAL IN-MEMORY STORAGE ---
-# These will be populated on application startup
+# --- GLOBAL IN-MEMORY STORAGE & LOCK ---
 dataframes: Dict[str, pd.DataFrame] = {}
 pws_cache: Dict[str, str] = {}
 cache_lock = threading.Lock()
 
+
 # --- CACHE AND DATA LOADING FUNCTIONS ---
 def load_cache_from_file():
-    """Loads the PWSID summary cache from the local JSON file into memory."""
+    """Loads the PWSID summary cache from the local JSON file."""
     global pws_cache
     if os.path.exists(CACHE_FILE):
         with open(CACHE_FILE, 'r') as f:
@@ -31,28 +35,32 @@ def load_cache_from_file():
                 pws_cache = json.load(f)
                 print(f"Loaded {len(pws_cache)} items from {CACHE_FILE}")
             except json.JSONDecodeError:
-                print(f"Warning: Could not decode JSON from {CACHE_FILE}. Starting with an empty cache.")
+                print(f"Warning: Could not decode JSON from {CACHE_FILE}. Starting with empty cache.")
                 pws_cache = {}
+
 
 def save_cache_to_file():
     """Saves the in-memory cache to the local JSON file."""
     with open(CACHE_FILE, 'w') as f:
-        # Use indent for a human-readable file that's friendly for version control
         json.dump(pws_cache, f, indent=4)
+
 
 def load_all_data():
     """
-    Loads all CSV files from the DATA_DIR into a dictionary of pandas DataFrames.
-    This function is called once on application startup.
+    Loads all CSV files from the DATA_DIR into memory on startup.
     """
     global dataframes
-    print("Loading all SDWIS data into memory...")
+    print(f"Loading all SDWIS data from '{DATA_DIR}' directory...")
+    if not os.path.isdir(DATA_DIR):
+        print(f"Error: Data directory '{DATA_DIR}' not found. Please create it and add your CSV files.")
+        return
+
     for filename in os.listdir(DATA_DIR):
         if filename.endswith(".csv"):
             file_key = os.path.splitext(filename)[0]
+            file_path = os.path.join(DATA_DIR, filename)
             try:
-                df = pd.read_csv(os.path.join(DATA_DIR, filename), low_memory=False)
-                # Pre-process the sortable quarter column to optimize filtering later
+                df = pd.read_csv(file_path, low_memory=False)
                 if 'SUBMISSIONYEARQUARTER' in df.columns:
                     df['sortable_quarter'] = df['SUBMISSIONYEARQUARTER'].str.replace('Q', '').astype(int)
                 dataframes[file_key] = df
@@ -64,40 +72,37 @@ def load_all_data():
 # --- FASTAPI LIFESPAN MANAGER ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Code to run on application startup
+    # On application startup
     print("Application startup...")
     load_all_data()
     load_cache_from_file()
     yield
-    # Code to run on application shutdown (optional)
+    # On application shutdown
     print("Application shutdown.")
 
 
 app = FastAPI(lifespan=lifespan)
 
+# --- Mount the data directory to be served publicly ---
+# A request to /data/SDWA_PUB_WATER_SYSTEMS.csv will serve that file
+app.mount("/data", StaticFiles(directory=DATA_DIR), name="data")
 
-# --- DATA PROCESSING & LLM FUNCTIONS (MODIFIED) ---
 
+# --- DATA PROCESSING & LLM FUNCTIONS ---
 def get_data_for_pwsid(pwsid: str) -> Dict[str, Any]:
-    """
-    Filters the pre-loaded DataFrames for a given PWSID.
-    """
     pws_data = {}
     for name, df in dataframes.items():
         if 'PWSID' in df.columns and 'sortable_quarter' in df.columns:
-            # Filter the already-loaded dataframe
             filtered_df = df[(df['PWSID'] == pwsid) & (df['sortable_quarter'] >= 20201)]
             if not filtered_df.empty:
-                pws_data[name] = filtered_df.to_dict(orient='records')
+                clean_name = name.replace("SDWA_", "").replace("_", " ").title()
+                pws_data[clean_name] = filtered_df.to_dict(orient='records')
     return pws_data
 
+
 def generate_summary_with_haiku(pwsid: str, data: Dict[str, Any]) -> str:
-    """
-    Generates a water quality summary using Anthropic's Claude 3 Haiku model.
-    (This function's core logic remains unchanged)
-    """
     prompt = f"""
-    Based on the following data for the public water system with ID {pwsid}, please provide a 1-3 paragraph summary of its water quality history since 2020. The summary should be easily understandable by a regular citizen.
+    Based on the following data for the public water system with ID {pwsid}, please provide a 1-3 paragraph summary of its water quality history since 2020. The summary should be easily understandable by a regular citizen, written in a clear and reassuring tone unless there are significant issues.
 
     Data:
     {str(data)}
@@ -115,25 +120,26 @@ def generate_summary_with_haiku(pwsid: str, data: Dict[str, Any]) -> str:
 
 # --- API ENDPOINTS ---
 
+@app.get("/", include_in_schema=False)
+async def root():
+    """Serves the main index.html file from the project root."""
+    if os.path.exists("index.html"):
+        return FileResponse('index.html')
+    raise HTTPException(status_code=404, detail="index.html not found in root directory.")
+
+
 @app.get("/water_quality/{pwsid}")
 async def get_water_quality_summary(pwsid: str):
-    """
-    This endpoint takes a Public Water System ID (PWSID) and returns a
-    summary of its water quality history using a persistent file cache.
-    """
-    # 1. Check the in-memory cache first
+    pwsid = pwsid.upper()  # Standardize PWSID
     if pwsid in pws_cache:
         return {"pwsid": pwsid, "summary": pws_cache[pwsid], "source": "cache"}
 
-    # 2. If not cached, get data from the pre-loaded dataframes
     data = get_data_for_pwsid(pwsid)
     if not data:
-        raise HTTPException(status_code=404, detail="PWSID not found or no data available after 2020.")
+        raise HTTPException(status_code=404, detail=f"PWSID '{pwsid}' not found or has no data available since 2020.")
 
-    # 3. Generate a new summary
     summary = generate_summary_with_haiku(pwsid, data)
 
-    # 4. Update the cache (in-memory and file) in a thread-safe way
     with cache_lock:
         pws_cache[pwsid] = summary
         save_cache_to_file()
@@ -141,14 +147,14 @@ async def get_water_quality_summary(pwsid: str):
 
     return {"pwsid": pwsid, "summary": summary, "source": "generated"}
 
+
 @app.get("/health")
 async def health_check():
-    """A simple health check endpoint to confirm the service is running."""
-    return {"status": "ok", "loaded_dataframes": list(dataframes.keys()), "cached_items": len(pws_cache)}
+    return {"status": "ok", "loaded_dataframes": len(dataframes), "cached_items": len(pws_cache)}
 
 # To run this application:
-# 1. Install necessary libraries: pip install "fastapi[all]" pandas anthropic
-# 2. Save the code as a Python file (e.g., `main.py`).
-# 3. Place the CSV data files in the same directory.
+# 1. Place 'main.py' and 'index.html' in your project root.
+# 2. Create a 'data' folder in the root and place your CSVs inside it.
+# 3. Install dependencies: pip install "fastapi[all]" pandas anthropic
 # 4. Set your Anthropic API key.
 # 5. Run from your terminal: uvicorn main:app --reload
