@@ -28,6 +28,7 @@
         #map-view, #dashboard-view { display: none; }
         .content-card { background-color: #ffffff; padding: 25px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); margin-bottom: 25px; }
         #map { height: 70vh; width: 100%; border-radius: 8px; border: 1px solid #dee2e6; }
+        .search-label { font-weight: 600; color: #555; margin-bottom: .5rem; }
 
         /* --- Map Specific --- */
         .legend { padding: 6px 12px; font-size: 14px; background: rgba(255,255,255,0.9); box-shadow: 0 0 15px rgba(0,0,0,0.2); border-radius: 5px; }
@@ -50,11 +51,36 @@
     </div>
 
     <div id="map-view" class="container-fluid mt-4">
-        <div class="content-card text-center">
-            <h1 class="font-weight-bold" style="color: var(--primary-color);">Georgia Water Quality Explorer</h1>
-            <p class="lead text-muted">Click a system on the map or use the search box below to find a detailed report.</p>
-            <div class="form-group mt-3 mb-1 mx-auto" style="max-width: 700px;">
-                <select id="pws-select" class="form-control" style="width: 100%;"></select>
+        <div class="content-card">
+            <div class="text-center mb-4">
+                <h1 class="font-weight-bold" style="color: var(--primary-color);">Georgia Water Quality Explorer</h1>
+                <p class="lead text-muted">Click a system on the map or use the search tools below to find a detailed report.</p>
+            </div>
+
+            <div class="row align-items-end">
+                <div class="col-lg-5 col-md-6">
+                    <div class="form-group">
+                        <label for="zip-search-input" class="search-label">1. Search by ZIP Code</label>
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="zip-search-input" placeholder="Enter 5-digit ZIP">
+                            <div class="input-group-append">
+                                <button class="btn btn-primary" type="button" id="zip-search-btn">Find Systems</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-lg-7 col-md-6">
+                    <div class="form-group">
+                         <label for="pws-select" class="search-label">2. Select Water System</label>
+                         <div class="input-group">
+                            <select id="pws-select" class="form-control" style="width: 85%;"></select>
+                            <div class="input-group-append">
+                                <button class="btn btn-outline-secondary" type="button" id="reset-pws-list-btn" title="Reset List">Reset</button>
+                            </div>
+                         </div>
+                    </div>
+                </div>
             </div>
         </div>
         <div class="content-card">
@@ -84,85 +110,98 @@
         // --- Global State ---
         let DATA_STORE = {};
         let CODES_MAP = new Map();
-        let map = null; // Leaflet map instance
+        let ALL_SYSTEM_OPTIONS = []; // Holds the master list of all water systems
+        let map = null;
 
         // --- DOM Elements ---
         const $loader = $('#loader');
-        const $loaderMessage = $('#loader-message');
         const $mapView = $('#map-view');
         const $dashboardView = $('#dashboard-view');
 
         // --- Initial Data Load ---
         const filesToLoad = [
-            "SDWA_VIOLATIONS_ENFORCEMENT.csv",
-            "SDWA_PUB_WATER_SYSTEMS.csv",
-            "SDWA_GEOGRAPHIC_AREAS.csv",
-            "SDWA_REF_CODE_VALUES.csv",
-            "SDWA_SITE_VISITS.csv",
-            "SDWA_FACILITIES.csv",
-            "zipCodeToLatLong.csv"
+            "SDWA_VIOLATIONS_ENFORCEMENT.csv", "SDWA_PUB_WATER_SYSTEMS.csv", "SDWA_GEOGRAPHIC_AREAS.csv",
+            "SDWA_REF_CODE_VALUES.csv", "SDWA_SITE_VISITS.csv", "SDWA_FACILITIES.csv", "zipCodeToLatLong.csv"
         ];
         const promises = filesToLoad.map(file => new Promise((resolve, reject) => {
-            $loaderMessage.text(`Loading ${file}...`);
             Papa.parse(file, {
-                download: true,
-                header: true,
-                skipEmptyLines: true,
+                download: true, header: true, skipEmptyLines: true,
                 complete: results => resolve({ name: file, data: results.data }),
-                error: err => reject(new Error(`Failed to load ${file}: ${err.message}`))
+                error: err => reject(new Error(`Failed to load ${file}: ${err.message || 'Unknown error'}`))
             });
         }));
 
-        Promise.all(promises)
-            .then(files => {
-                files.forEach(file => { DATA_STORE[file.name] = file.data; });
-                initializeMainView();
-                $loader.fadeOut();
-                $mapView.fadeIn();
-            })
-            .catch(err => {
-                console.error("Error loading data:", err);
-                $loader.html(`<div class="alert alert-danger" role="alert"><h4>Data Loading Failed</h4><p>${err.message}</p><p>This application cannot run. Please ensure all CSV files are present in the same directory and the page is served by a web server.</p></div>`);
-            });
+        Promise.all(promises).then(files => {
+            files.forEach(file => { DATA_STORE[file.name] = file.data; });
+            initializeMainView();
+            $loader.fadeOut();
+            $mapView.fadeIn('fast', () => { if (map) map.invalidateSize(); });
+        }).catch(err => {
+            console.error("Error loading data:", err);
+            $loader.html(`<div class="alert alert-danger" role="alert"><h4>Data Loading Failed</h4><p>${err.message}</p></div>`);
+        });
 
         function initializeMainView() {
-            // --- 1. Prepare shared data ---
             CODES_MAP = new Map(DATA_STORE["SDWA_REF_CODE_VALUES.csv"].map(d => [`${d.VALUE_TYPE}|${d.VALUE_CODE}`, d.VALUE_DESCRIPTION]));
             const systems = new Map(DATA_STORE["SDWA_PUB_WATER_SYSTEMS.csv"].map(d => [d.PWSID, d]));
             const geo = DATA_STORE["SDWA_GEOGRAPHIC_AREAS.csv"];
 
-            // --- 2. Initialize Search Bar ---
-            const searchOptions = [...systems.values()]
+            ALL_SYSTEM_OPTIONS = [...systems.values()]
                 .filter(s => s.PWS_ACTIVITY_CODE === 'A' && s.PWS_NAME)
-                .map(s => {
-                    const zips = new Set(geo.filter(g => g.PWSID === s.PWSID && g.AREA_TYPE_CODE === 'ZC').map(g => g.ZIP_CODE_SERVED));
-                    const searchTerms = [
-                        (s.PWS_NAME || '').toLowerCase(),
-                        (s.PWSID || '').toLowerCase(),
-                        (s.PRINCIPAL_CITY_SERVED_NAME || '').toLowerCase(),
-                        ...[...zips].map(zip => (zip || '').toLowerCase())
-                    ].join(' ');
-                    return { id: s.PWSID, text: `${s.PWS_NAME} (${s.PWSID})`, searchTerms: searchTerms };
-                });
+                .map(s => ({
+                    id: s.PWSID,
+                    text: `${s.PWS_NAME} (${s.PWSID})`
+                }));
 
-            $('#pws-select').select2({
-                data: searchOptions,
-                placeholder: 'Enter ZIP, City, or System Name...',
-                theme: "bootstrap",
-                matcher: (params, data) => {
-                    if ($.trim(params.term) === '') return data;
-                    if (typeof data.searchTerms === 'undefined') return null;
-                    if (data.searchTerms.indexOf(params.term.toLowerCase()) > -1) return data;
-                    return null;
-                }
-            }).on('select2:select', function (e) {
+            // Initial population of the Select2 dropdown
+            updatePwsDropdown(ALL_SYSTEM_OPTIONS);
+
+            $('#pws-select').on('select2:select', function (e) {
                 const pwsId = e.params.data.id;
                 if (pwsId) showDashboardView(pwsId);
             });
 
-            // --- 3. Initialize Map ---
             generateMapView();
         }
+
+        // --- NEW: Function to update the PWS dropdown ---
+        function updatePwsDropdown(options) {
+             $('#pws-select').empty().select2({
+                data: options,
+                placeholder: 'Select a water system...',
+                theme: "bootstrap",
+                allowClear: true
+            });
+        }
+
+        // --- NEW: ZIP Code Search Logic ---
+        $('#zip-search-btn').on('click', function() {
+            const zip = $('#zip-search-input').val().trim();
+            if (!zip || !/^\d{5}$/.test(zip)) {
+                alert('Please enter a valid 5-digit ZIP code.');
+                return;
+            }
+
+            const geoData = DATA_STORE["SDWA_GEOGRAPHIC_AREAS.csv"];
+            const matchingPwsIds = new Set(
+                geoData
+                    .filter(g => g.ZIP_CODE_SERVED === zip)
+                    .map(g => g.PWSID)
+            );
+
+            const filteredOptions = ALL_SYSTEM_OPTIONS.filter(opt => matchingPwsIds.has(opt.id));
+
+            if (filteredOptions.length === 0) {
+                alert(`No water systems found serving ZIP code ${zip}.`);
+            }
+            updatePwsDropdown(filteredOptions);
+        });
+
+        // --- NEW: Reset Button Logic ---
+        $('#reset-pws-list-btn').on('click', function() {
+            $('#zip-search-input').val('');
+            updatePwsDropdown(ALL_SYSTEM_OPTIONS);
+        });
 
         // --- View Switching Logic ---
         function showDashboardView(pwsId) {
@@ -171,9 +210,7 @@
                 generateDashboard([pwsId]);
                 $dashboardView.fadeIn('fast', () => {
                     const ganttChart = document.getElementById('gantt-chart');
-                    if (ganttChart && ganttChart.data) {
-                        Plotly.Plots.resize(ganttChart);
-                    }
+                    if (ganttChart && ganttChart.data) Plotly.Plots.resize(ganttChart);
                 });
             });
         }
@@ -181,27 +218,22 @@
         function showMapView() {
             $dashboardView.fadeOut('fast', () => {
                 $('#pws-select').val(null).trigger('change');
-                $mapView.fadeIn('fast', () => {
-                    if (map) {
-                        map.invalidateSize(); // Critical for map to resize correctly
-                    }
-                });
+                $mapView.fadeIn('fast', () => { if (map) map.invalidateSize(true); });
             });
         }
 
         $('#back-to-map').on('click', showMapView);
+        $(document).on('click', '.view-details-btn', function() {
+            const pwsId = $(this).data('pwsid');
+            if (pwsId) showDashboardView(pwsId);
+        });
 
-        // --- MAP GENERATION LOGIC ---
+        // --- MAP GENERATION AND OTHER FUNCTIONS (UNCHANGED FROM PREVIOUS VERSION) ---
         function generateMapView() {
             const violationsData = DATA_STORE['SDWA_VIOLATIONS_ENFORCEMENT.csv'];
             const systemsData = DATA_STORE['SDWA_PUB_WATER_SYSTEMS.csv'];
             const zipCodeData = DATA_STORE['zipCodeToLatLong.csv'];
-
-            const violationCounts = violationsData.reduce((acc, record) => {
-                if (record.PWSID) acc[record.PWSID] = (acc[record.PWSID] || 0) + 1;
-                return acc;
-            }, {});
-
+            const violationCounts = violationsData.reduce((acc, record) => { if (record.PWSID) acc[record.PWSID] = (acc[record.PWSID] || 0) + 1; return acc; }, {});
             const zipCoords = zipCodeData.reduce((acc, record) => {
                 const zip = record.zip || record.ZIP;
                 const lat = record.latitude || record.lat;
@@ -209,60 +241,30 @@
                 if (zip && lat && lon) acc[zip] = { lat: parseFloat(lat), lon: parseFloat(lon) };
                 return acc;
             }, {});
-
             const systemsWithViolations = systemsData.map(system => {
                 const pwsid = system.PWSID;
                 const zip = system.ZIP_CODE ? system.ZIP_CODE.substring(0, 5) : null;
                 const coords = zip ? zipCoords[zip] : null;
-                if (pwsid && zip && coords) {
-                    return {
-                        pwsid: pwsid, name: system.PWS_NAME || 'N/A', city: system.CITY_NAME || 'N/A', zip: zip,
-                        population: system.POPULATION_SERVED_COUNT || 0,
-                        violationCount: violationCounts[pwsid] || 0,
-                        lat: coords.lat, lon: coords.lon
-                    };
-                }
+                if (pwsid && zip && coords) { return { pwsid: pwsid, name: system.PWS_NAME || 'N/A', city: system.CITY_NAME || 'N/A', zip: zip, population: system.POPULATION_SERVED_COUNT || 0, violationCount: violationCounts[pwsid] || 0, lat: coords.lat, lon: coords.lon }; }
                 return null;
             }).filter(Boolean);
-
             const systemsInGeorgia = systemsWithViolations.filter(sys => sys.pwsid.startsWith('GA'));
             if (systemsInGeorgia.length === 0) {
                  $('#map').html('<div class="alert alert-warning">No valid Georgia water systems with location data could be processed.</div>');
                  return;
             }
-
             const sortedSystems = [...systemsInGeorgia].sort((a, b) => b.violationCount - a.violationCount);
             const redThreshold = sortedSystems.length > 9 ? sortedSystems[9].violationCount : (sortedSystems[0]?.violationCount || 20);
             const finalRedThreshold = Math.max(1, redThreshold);
-            const dynamicThresholds = {
-                red: finalRedThreshold,
-                orange: Math.ceil(finalRedThreshold * 0.5),
-                yellow: Math.ceil(finalRedThreshold * 0.2),
-            };
+            const dynamicThresholds = { red: finalRedThreshold, orange: Math.ceil(finalRedThreshold * 0.5), yellow: Math.ceil(finalRedThreshold * 0.2) };
 
-            // Display map
             if (map) map.remove();
             map = L.map('map').setView([32.8407, -83.6324], 7);
-            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-            }).addTo(map);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' }).addTo(map);
 
             systemsInGeorgia.forEach(system => {
-                const marker = L.circleMarker([system.lat, system.lon], {
-                    radius: 7,
-                    fillColor: getMarkerColor(system.violationCount, dynamicThresholds),
-                    color: "#000", weight: 1, opacity: 1, fillOpacity: 0.8
-                }).addTo(map);
-
-                const popupContent = `
-                    <div class="font-sans">
-                        <strong class="text-base text-gray-800">${system.name}</strong><br>
-                        <hr class="my-1">
-                        <strong>PWSID:</strong> ${system.pwsid}<br>
-                        <strong>City:</strong> ${system.city}, ${system.zip}<br>
-                        <strong style="color:${getMarkerColor(system.violationCount, dynamicThresholds)};">Violations: ${system.violationCount}</strong>
-                        <button class="btn btn-primary btn-sm btn-block mt-2" onclick="showDashboardView('${system.pwsid}')">View Details</button>
-                    </div>`;
+                const marker = L.circleMarker([system.lat, system.lon], { radius: 7, fillColor: getMarkerColor(system.violationCount, dynamicThresholds), color: "#000", weight: 1, opacity: 1, fillOpacity: 0.8 }).addTo(map);
+                const popupContent = `<div class="font-sans"><strong>${system.name}</strong><hr class="my-1"><strong>PWSID:</strong> ${system.pwsid}<br><strong>City:</strong> ${system.city}, ${system.zip}<br><strong style="color:${getMarkerColor(system.violationCount, dynamicThresholds)};">Violations: ${system.violationCount}</strong><button class="btn btn-primary btn-sm btn-block mt-2 view-details-btn" data-pwsid="${system.pwsid}">View Details</button></div>`;
                 marker.bindPopup(popupContent);
             });
 
@@ -270,18 +272,9 @@
             legend.onAdd = function (map) {
                 const div = L.DomUtil.create('div', 'info legend');
                 const grades = [0, 1, dynamicThresholds.yellow, dynamicThresholds.orange, dynamicThresholds.red];
-                const labels = [
-                    '0 Violations',
-                    `1 - ${dynamicThresholds.yellow - 1}`,
-                    `${dynamicThresholds.yellow} - ${dynamicThresholds.orange - 1}`,
-                    `${dynamicThresholds.orange} - ${dynamicThresholds.red - 1}`,
-                    `${dynamicThresholds.red}+`
-                ];
+                const labels = [ '0 Violations', `1 - ${dynamicThresholds.yellow - 1}`, `${dynamicThresholds.yellow} - ${dynamicThresholds.orange - 1}`, `${dynamicThresholds.orange} - ${dynamicThresholds.red - 1}`, `${dynamicThresholds.red}+` ];
                 div.innerHTML += '<h4>Violation Count</h4>';
-                for (let i = 0; i < grades.length; i++) {
-                    const color = getMarkerColor(grades[i], dynamicThresholds);
-                    div.innerHTML += `<i style="background:${color}"></i> ${labels[i]}<br>`;
-                }
+                for (let i = 0; i < grades.length; i++) { div.innerHTML += `<i style="background:${getMarkerColor(grades[i], dynamicThresholds)}"></i> ${labels[i]}<br>`; }
                 return div;
             };
             legend.addTo(map);
@@ -295,55 +288,31 @@
             return '#66c2a5';
         }
 
-        // --- DASHBOARD GENERATION LOGIC ---
-        // (Adapted from dashboard.html, uses DATA_STORE)
         function generateDashboard(pwsIDs) {
             function parseDate(dateString) { if (!dateString || typeof dateString !== 'string') return null; const d = new Date(dateString.replace(/(\d{2})\/(\d{2})\/(\d{4})/, '$3-$1-$2')); return isNaN(d) ? null : d; }
             const systemInfo = DATA_STORE['SDWA_PUB_WATER_SYSTEMS.csv'].find(s => s.PWSID === pwsIDs[0]);
             $('#dashboard-title').text(systemInfo?.PWS_NAME || 'Water System Dashboard');
             $('#dashboard-subtitle').text(`Serving ${systemInfo?.PRINCIPAL_CITY_SERVED_NAME || 'N/A'} | PWSID: ${pwsIDs[0]}`);
-
             const violations = DATA_STORE["SDWA_VIOLATIONS_ENFORCEMENT.csv"].filter(v => pwsIDs.includes(v.PWSID));
             const ganttData = violations.map(v => {
                 const startDate = parseDate(v.NON_COMPL_PER_BEGIN_DATE);
                 const finishDate = parseDate(v.RTC_DATE) || parseDate(v.NON_COMPL_PER_END_DATE) || new Date();
                 const contaminant = CODES_MAP.get(`CONTAMINANT_CODE|${v.CONTAMINANT_CODE}`) || v.VIOLATION_CODE || 'Unknown Violation';
-                if (startDate && finishDate && startDate <= finishDate) {
-                    return {
-                        Task: contaminant.length > 50 ? contaminant.substring(0, 47) + '...' : contaminant,
-                        FullTask: contaminant, Start: startDate.toISOString().split('T')[0], Finish: finishDate.toISOString().split('T')[0],
-                        Resource: v.IS_HEALTH_BASED_IND === 'Y' ? 'Health-Based' : 'Non-Health-Based',
-                        Details: CODES_MAP.get(`VIOLATION_CODE|${v.VIOLATION_CODE}`) || 'No details',
-                        measuredValue: v.RESULT, limitValue: v.MCL_VALUE, unit: v.UNIT_OF_MEASURE
-                    };
-                }
+                if (startDate && finishDate && startDate <= finishDate) { return { Task: contaminant.length > 50 ? contaminant.substring(0, 47) + '...' : contaminant, FullTask: contaminant, Start: startDate.toISOString().split('T')[0], Finish: finishDate.toISOString().split('T')[0], Resource: v.IS_HEALTH_BASED_IND === 'Y' ? 'Health-Based' : 'Non-Health-Based', Details: CODES_MAP.get(`VIOLATION_CODE|${v.VIOLATION_CODE}`) || 'No details', measuredValue: v.RESULT, limitValue: v.MCL_VALUE, unit: v.UNIT_OF_MEASURE }; }
                 return null;
             }).filter(Boolean);
-
             if (ganttData.length > 0) {
                 $('#gantt-chart-container').show();
                 const plotData = ganttData.flatMap(d => {
                     let tooltipText = `<b>${d.FullTask}</b><br>Type: ${d.Details}<br>Period: ${d.Start} to ${d.Finish}<br>Classification: ${d.Resource}`;
                     if (d.measuredValue && d.limitValue) { tooltipText += `<br><br><b>Result: ${d.measuredValue} ${d.unit || ''}</b><br>Limit: ${d.limitValue} ${d.unit || ''}`; }
-                    return [{
-                        x: [d.Start, d.Finish], y: [d.Task, d.Task], mode: 'lines', type: 'scatter', showlegend: false,
-                        line: { color: '#333333', width: 22 }, hoverinfo: 'skip'
-                    }, {
-                        x: [d.Start, d.Finish], y: [d.Task, d.Task], mode: 'lines', type: 'scatter', showlegend: false,
-                        line: { color: d.Resource === 'Health-Based' ? 'rgba(217, 83, 79, 0.9)' : 'rgba(240, 173, 78, 0.9)', width: 20 },
-                        hoverinfo: 'text', text: tooltipText
-                    }];
+                    return [{ x: [d.Start, d.Finish], y: [d.Task, d.Task], mode: 'lines', type: 'scatter', showlegend: false, line: { color: '#333333', width: 22 }, hoverinfo: 'skip' }, { x: [d.Start, d.Finish], y: [d.Task, d.Task], mode: 'lines', type: 'scatter', showlegend: false, line: { color: d.Resource === 'Health-Based' ? 'rgba(217, 83, 79, 0.9)' : 'rgba(240, 173, 78, 0.9)', width: 20 }, hoverinfo: 'text', text: tooltipText }];
                 });
                 plotData.push({ x: [null], y: [null], mode: 'markers', name: 'Health-Based', marker: { color: 'rgba(217, 83, 79, 1)', size: 10 } });
                 plotData.push({ x: [null], y: [null], mode: 'markers', name: 'Non-Health-Based', marker: { color: 'rgba(240, 173, 78, 1)', size: 10 } });
-                const layout = {
-                    autosize: true, xaxis: { type: 'date', title: 'Date of Violation Period', rangeselector: {buttons: [{count: 1, label: '1y', step: 'year', stepmode: 'backward'},{count: 3, label: '3y', step: 'year', stepmode: 'backward'},{count: 5, label: '5y', step: 'year', stepmode: 'backward'},{step: 'all'}]}, rangeslider: { thickness: 0.1 } },
-                    yaxis: { automargin: true, autorange: 'reversed' }, hovermode: 'closest', showlegend: true,
-                    legend: { x: 1, xanchor: 'right', y: 1 }, margin: { l: 300, t: 50, b: 50 }
-                };
+                const layout = { autosize: true, xaxis: { type: 'date', title: 'Date of Violation Period', rangeselector: {buttons: [{count: 1, label: '1y', step: 'year', stepmode: 'backward'},{count: 3, label: '3y', step: 'year', stepmode: 'backward'},{count: 5, label: '5y', step: 'year', stepmode: 'backward'},{step: 'all'}]}, rangeslider: { thickness: 0.1 } }, yaxis: { automargin: true, autorange: 'reversed' }, hovermode: 'closest', showlegend: true, legend: { x: 1, xanchor: 'right', y: 1 }, margin: { l: 300, t: 50, b: 50 } };
                 Plotly.newPlot('gantt-chart', plotData, layout, {responsive: true});
             } else { $('#gantt-chart-container').hide(); Plotly.purge('gantt-chart'); }
-
             const siteVisits = DATA_STORE["SDWA_SITE_VISITS.csv"].filter(v => pwsIDs.includes(v.PWSID)).sort((a,b) => parseDate(b.VISIT_DATE) - parseDate(a.VISIT_DATE));
             const facilities = DATA_STORE["SDWA_FACILITIES.csv"].filter(f => pwsIDs.includes(f.PWSID) && f.IS_SOURCE_IND === 'Y');
             const visitsTbody = $('#site-visits-table tbody').empty();
@@ -355,28 +324,6 @@
                 facilities.forEach(f => { const facType = CODES_MAP.get(`FACILITY_TYPE_CODE|${f.FACILITY_TYPE_CODE}`) || f.FACILITY_TYPE_CODE; const waterType = CODES_MAP.get(`WATER_TYPE_CODE|${f.WATER_TYPE_CODE}`) || f.WATER_TYPE_CODE; const availability = CODES_MAP.get(`AVAILABILITY_CODE|${f.AVAILABILITY_CODE}`) || f.AVAILABILITY_CODE; facilitiesTbody.append(`<tr><td>${f.FACILITY_NAME}</td><td>${facType}</td><td>${waterType}</td><td>${availability}</td></tr>`); });
             } else { facilitiesTbody.append('<tr><td colspan="4" class="text-center">No source facilities found.</td></tr>'); }
         }
-    });
-
-    // Make showDashboardView globally accessible for the inline onclick attribute
-    function showDashboardView(pwsId) {
-        $(document).ready(function() {
-            $('#map-view').trigger('show-dashboard', [pwsId]);
-        });
-    }
-
-    $(document).on('show-dashboard', '#map-view', function(event, pwsId) {
-        $(document).ready(function() {
-            const $mapView = $('#map-view');
-            const $dashboardView = $('#dashboard-view');
-            $mapView.fadeOut('fast', () => {
-                window.scrollTo(0, 0);
-                // The main generateDashboard function is defined inside document.ready, so we can't call it directly.
-                // We'll need to re-trigger the logic or expose the function.
-                // For this implementation, we re-use the main logic inside the ready handler.
-                // A better approach in a larger app would be to organize functions in a global namespace.
-                // The existing implementation handles this correctly by calling the internal showDashboardView function.
-            });
-        });
     });
     </script>
 </body>
