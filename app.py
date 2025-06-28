@@ -101,11 +101,33 @@ def get_data_for_pwsid(pwsid: str) -> Dict[str, Any]:
 
 
 def generate_summary_with_haiku(pwsid: str, data: Dict[str, Any]) -> str:
+    # --- MODIFICATION START ---
+
+    # Create a formatted string to hold multiple CSV blocks
+    data_as_csv_strings = []
+    for table_name, records in data.items():
+        if not records:
+            continue
+        # Convert the list of dictionary records back to a DataFrame
+        df = pd.DataFrame(records)
+        # Convert DataFrame to a CSV string, excluding the pandas index
+        csv_string = df.to_csv(index=False)
+
+        # Add the table name as a header for the model to understand context
+        data_as_csv_strings.append(f"--- Data from {table_name} ---\n{csv_string}")
+
+    # Join all the individual CSV blocks into one string
+    formatted_data = "\n\n".join(data_as_csv_strings)
+
+    # --- MODIFICATION END ---
+
     prompt = f"""
     Based on the following data for the public water system with ID {pwsid}, please provide a 1-3 paragraph summary of its water quality history since 2020. The summary should be easily understandable by a regular citizen, written in a clear and reassuring tone unless there are significant issues.
 
+    The data is provided in separate CSV-formatted blocks.
+
     Data:
-    {str(data)}
+    {formatted_data}
     """
     try:
         message = client.messages.create(
