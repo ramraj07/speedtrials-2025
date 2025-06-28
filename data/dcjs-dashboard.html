@@ -258,17 +258,53 @@
             const codesMap = new Map(DATA_STORE["SDWA_REF_CODE_VALUES.csv"].map(d => [`${d.VALUE_TYPE}|${d.VALUE_CODE}`, d.VALUE_DESCRIPTION]));
 
             // --- Gantt Chart ---
-            const ganttData = violations.map(v => ({
-                Task: codesMap.get(`CONTAMINANT_CODE|${v.CONTAMINANT_CODE}`) || v.CONTAMINANT_CODE,
-                Start: v.NON_COMPL_PER_BEGIN_DATE,
-                Finish: v.NON_COMPL_PER_END_DATE || new Date().toISOString().split('T')[0], // Use today for ongoing
-                Resource: v.IS_HEALTH_BASED_IND === 'Y' ? 'Health-Based' : 'Non-Health-Based'
-            })).filter(d => d.Start);
+            const ganttData = violations.map(v => {
+                const today = new Date().toISOString().split('T')[0];
+                const startDate = v.NON_COMPL_PER_BEGIN_DATE;
+                const finishDate = v.NON_COMPL_PER_END_DATE || today;
+
+                // Ensure start date is before finish date
+                if (startDate && new Date(startDate) < new Date(finishDate)) {
+                    return {
+                        Task: codesMap.get(`CONTAMINANT_CODE|${v.CONTAMINANT_CODE}`) || v.CONTAMINANT_CODE,
+                        Start: startDate,
+                        Finish: finishDate,
+                        Resource: v.IS_HEALTH_BASED_IND === 'Y' ? 'Health-Based' : 'Non-Health-Based'
+                    };
+                }
+                return null;
+            }).filter(d => d !== null); // Filter out invalid date ranges
 
             if (ganttData.length > 0) {
-                const colors = {'Health-Based': 'rgb(217, 83, 79)', 'Non-Health-Based': 'rgb(240, 173, 78)'};
-                const fig = ff.create_gantt(ganttData, colors=colors, index_col='Resource', show_colorbar=true, group_tasks=true);
-                Plotly.newPlot('gantt-chart', fig);
+                // This is a plotly.js native way to create a Gantt chart using scatter plot lines
+                const plotData = ganttData.map(d => ({
+                    x: [d.Start, d.Finish],
+                    y: [d.Task, d.Task],
+                    mode: 'lines',
+                    line: {
+                        color: d.Resource === 'Health-Based' ? 'rgb(217, 83, 79)' : 'rgb(240, 173, 78)',
+                        width: 20
+                    },
+                    type: 'scatter',
+                    showlegend: false,
+                    hoverinfo: 'text',
+                    text: `${d.Task}<br>Start: ${d.Start}<br>End: ${d.Finish}`
+                }));
+
+                // Add manual traces for the legend
+                plotData.push({ x: [null], y: [null], mode: 'lines', name: 'Health-Based', line: { color: 'rgb(217, 83, 79)', width: 10 } });
+                plotData.push({ x: [null], y: [null], mode: 'lines', name: 'Non-Health-Based', line: { color: 'rgb(240, 173, 78)', width: 10 } });
+
+                const layout = {
+                    title: 'Violation Timeline',
+                    xaxis: { title: 'Date' },
+                    yaxis: { title: 'Contaminant / Rule', autorange: 'reversed' },
+                    hovermode: 'closest',
+                    showlegend: true
+                };
+
+                Plotly.newPlot('gantt-chart', plotData, layout);
+
             } else {
                  $('#gantt-chart').html('<p class="text-center">No violation data to display.</p>');
             }
