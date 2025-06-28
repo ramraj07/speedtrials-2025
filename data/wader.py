@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import io
+import os
 
 # --- Configuration and Page Setup ---
 st.set_page_config(
@@ -12,157 +13,65 @@ st.set_page_config(
 )
 
 
-# --- Data Simulation ---
-# In a real-world scenario, you would load the 10 CSV files.
-# For this self-contained example, we'll simulate those files with mock dataframes.
-# This ensures the dashboard is fully functional without needing external files.
-
+# --- Data Loading ---
 @st.cache_data
-def load_mock_data():
+def load_real_data():
     """
-    Creates a dictionary of pandas DataFrames to simulate the SDWIS CSV files.
+    Loads the SDWIS CSV files from the local directory into a dictionary of pandas DataFrames.
     This data is cached to improve performance.
     """
     data = {}
-    qtr = '2025Q1'
-    georgia_pws_ids = [f'GA000000{i}' for i in range(1, 21)]
-    cities = ['Atlanta', 'Augusta', 'Columbus', 'Savannah', 'Athens', 'Macon', 'Roswell', 'Albany', 'Marietta',
-              'Warner Robins']
-    counties = ['Fulton', 'Richmond', 'Muscogee', 'Chatham', 'Clarke', 'Bibb', 'Cobb', 'Dougherty', 'Gwinnett',
-                'Houston']
-
-    # --- SDWA_PUB_WATER_SYSTEMS.csv ---
-    pws_data = []
-    for i, pwsid in enumerate(georgia_pws_ids):
-        pws_data.append({
-            'SUBMISSIONYEARQUARTER': qtr,
-            'PWSID': pwsid,
-            'PWS_NAME': f'{cities[i % len(cities)]} Water Works',
-            'PWS_TYPE_CODE': np.random.choice(['CWS', 'TNCWS', 'NTNCWS'], p=[0.7, 0.15, 0.15]),
-            'POPULATION_SERVED_COUNT': np.random.randint(500, 500000),
-            'SERVICE_CONNECTIONS_COUNT': np.random.randint(150, 150000),
-            'PRIMARY_SOURCE_CODE': np.random.choice(['GW', 'SW', 'GWP', 'SWP', 'GU'], p=[0.5, 0.2, 0.1, 0.1, 0.1]),
-            'IS_SCHOOL_OR_DAYCARE_IND': np.random.choice(['Y', 'N'], p=[0.1, 0.9]),
-            'SOURCE_WATER_PROTECTION_CODE': np.random.choice(['Y', 'N'], p=[0.6, 0.4]),
-            'ORG_NAME': f'{cities[i % len(cities)]} Dept. of Water',
-            'CITY_NAME': cities[i % len(cities)],
-            'STATE_CODE': 'GA',
-            'ZIP_CODE': f'303{i:02d}'
-        })
-    data['SDWA_PUB_WATER_SYSTEMS'] = pd.DataFrame(pws_data)
-
-    # --- SDWA_VIOLATIONS_ENFORCEMENT.csv ---
-    violations_data = []
-    for pwsid in np.random.choice(georgia_pws_ids, size=15, replace=False):
-        for _ in range(np.random.randint(1, 4)):
-            is_health_based = np.random.choice(['Y', 'N'], p=[0.4, 0.6])
-            violations_data.append({
-                'SUBMISSIONYEARQUARTER': qtr,
-                'PWSID': pwsid,
-                'VIOLATION_ID': f'V-{np.random.randint(10000, 99999)}',
-                'VIOLATION_CODE': f'V{np.random.randint(1, 5)}',
-                'IS_HEALTH_BASED_IND': is_health_based,
-                'CONTAMINANT_CODE': np.random.choice(
-                    ['1022', '1030', '2950', '4000']) if is_health_based == 'Y' else 'MR1',
-                'NON_COMPL_PER_BEGIN_DATE': '01/15/2025',
-                'NON_COMPL_PER_END_DATE': np.random.choice([None, '03/10/2025'], p=[0.5, 0.5]),
-                'VIOLATION_STATUS': 'Unaddressed' if pd.isnull(
-                    violations_data[-1]['NON_COMPL_PER_END_DATE'] if violations_data else None) else 'Resolved',
-                'ENFORCEMENT_ID': f'E-{np.random.randint(1000, 9999)}' if np.random.rand() > 0.5 else None,
-                'ENFORCEMENT_ACTION_TYPE_CODE': 'FA01' if violations_data[-1]['ENFORCEMENT_ID'] else None,
-                'ENFORCEMENT_DATE': '02/20/2025' if violations_data[-1]['ENFORCEMENT_ID'] else None
-            })
-    data['SDWA_VIOLATIONS_ENFORCEMENT'] = pd.DataFrame(violations_data)
-
-    # --- SDWA_LCR_SAMPLES.csv ---
-    lcr_data = []
-    for pwsid in np.random.choice(georgia_pws_ids, size=10, replace=False):
-        for contaminant, code, unit in [('Lead', '1030', 'mg/L'), ('Copper', '1022', 'mg/L')]:
-            lcr_data.append({
-                'SUBMISSIONYEARQUARTER': qtr,
-                'PWSID': pwsid,
-                'SAMPLE_ID': f'LCR-{np.random.randint(1000, 9999)}',
-                'SAMPLING_END_DATE': '03/01/2025',
-                'CONTAMINANT_CODE': code,
-                'SAMPLE_MEASURE': round(
-                    np.random.uniform(0.001, 0.025) if contaminant == 'Lead' else np.random.uniform(0.1, 1.5), 4),
-                'UNIT_OF_MEASURE': unit,
-            })
-    data['SDWA_LCR_SAMPLES'] = pd.DataFrame(lcr_data)
-
-    # --- SDWA_SITE_VISITS.csv ---
-    visits_data = []
-    for pwsid in np.random.choice(georgia_pws_ids, size=18, replace=False):
-        visits_data.append({
-            'SUBMISSIONYEARQUARTER': qtr,
-            'PWSID': pwsid,
-            'VISIT_ID': f'SV-{np.random.randint(1000, 9999)}',
-            'VISIT_DATE': f'02/{np.random.randint(1, 28):02d}/2025',
-            'VISIT_REASON_CODE': 'SS',
-            'MANAGEMENT_OPS_EVAL_CODE': np.random.choice(['N', 'R', 'M', 'S'], p=[0.5, 0.3, 0.15, 0.05])
-        })
-    data['SDWA_SITE_VISITS'] = pd.DataFrame(visits_data)
-
-    # --- SDWA_FACILITIES.csv ---
-    facilities_data = []
-    for pwsid in georgia_pws_ids:
-        # Each system has a distribution system and a source
-        facilities_data.append({
-            'SUBMISSIONYEARQUARTER': qtr, 'PWSID': pwsid, 'FACILITY_ID': f'{pwsid}-DS',
-            'FACILITY_NAME': 'Main Distribution System', 'FACILITY_TYPE_CODE': 'DS', 'IS_SOURCE_IND': 'N',
-            'WATER_TYPE_CODE': None, 'SOURCE_WATER_PROTECTION_CODE': None
-        })
-        source_type = data['SDWA_PUB_WATER_SYSTEMS'].loc[
-            data['SDWA_PUB_WATER_SYSTEMS']['PWSID'] == pwsid, 'PRIMARY_SOURCE_CODE'].iloc[0]
-        fac_type = 'WL' if 'G' in source_type else 'IN'  # Well or Intake
-        water_type = 'GW' if 'G' in source_type else 'SW'
-        facilities_data.append({
-            'SUBMISSIONYEARQUARTER': qtr, 'PWSID': pwsid, 'FACILITY_ID': f'{pwsid}-SRC1',
-            'FACILITY_NAME': f'Primary Source - {fac_type}', 'FACILITY_TYPE_CODE': fac_type, 'IS_SOURCE_IND': 'Y',
-            'WATER_TYPE_CODE': water_type, 'SOURCE_WATER_PROTECTION_CODE': np.random.choice(['Y', 'N'])
-        })
-    data['SDWA_FACILITIES'] = pd.DataFrame(facilities_data)
-
-    # --- SDWA_GEOGRAPHIC_AREAS.csv ---
-    geo_data = []
-    for i, pwsid in enumerate(georgia_pws_ids):
-        geo_data.append({
-            'SUBMISSIONYEARQUARTER': qtr, 'PWSID': pwsid, 'GEO_ID': f'G-{pwsid}-CITY',
-            'AREA_TYPE_CODE': 'CT', 'CITY_SERVED': cities[i % len(cities)]
-        })
-        geo_data.append({
-            'SUBMISSIONYEARQUARTER': qtr, 'PWSID': pwsid, 'GEO_ID': f'G-{pwsid}-COUNTY',
-            'AREA_TYPE_CODE': 'CN', 'COUNTY_SERVED': counties[i % len(counties)]
-        })
-    data['SDWA_GEOGRAPHIC_AREAS'] = pd.DataFrame(geo_data)
-
-    # --- SDWA_REF_CODE_VALUES.csv ---
-    ref_codes = [
-        {'VALUE_TYPE': 'CONTAMINANT_CODE', 'VALUE_CODE': '1022', 'VALUE_DESCRIPTION': 'Copper'},
-        {'VALUE_TYPE': 'CONTAMINANT_CODE', 'VALUE_CODE': '1030', 'VALUE_DESCRIPTION': 'Lead'},
-        {'VALUE_TYPE': 'CONTAMINANT_CODE', 'VALUE_CODE': '2950', 'VALUE_DESCRIPTION': 'Total Trihalomethanes (TTHM)'},
-        {'VALUE_TYPE': 'CONTAMINANT_CODE', 'VALUE_CODE': '4000', 'VALUE_DESCRIPTION': 'Arsenic'},
-        {'VALUE_TYPE': 'CONTAMINANT_CODE', 'VALUE_CODE': 'MR1', 'VALUE_DESCRIPTION': 'Monitoring/Reporting Failure'},
-        {'VALUE_TYPE': 'VIOLATION_CODE', 'VALUE_CODE': 'V1', 'VALUE_DESCRIPTION': 'MCL, Single Sample'},
-        {'VALUE_TYPE': 'VIOLATION_CODE', 'VALUE_CODE': 'V2', 'VALUE_DESCRIPTION': 'MCL, Average'},
-        {'VALUE_TYPE': 'VIOLATION_CODE', 'VALUE_CODE': 'V3', 'VALUE_DESCRIPTION': 'Treatment Technique'},
-        {'VALUE_TYPE': 'VIOLATION_CODE', 'VALUE_CODE': 'V4', 'VALUE_DESCRIPTION': 'Monitoring & Reporting'},
-        {'VALUE_TYPE': 'VISIT_REASON_CODE', 'VALUE_CODE': 'SS', 'VALUE_DESCRIPTION': 'Sanitary Survey'},
-        {'VALUE_TYPE': 'ENFORCEMENT_ACTION_TYPE_CODE', 'VALUE_CODE': 'FA01',
-         'VALUE_DESCRIPTION': 'Formal Administrative Order'},
-        {'VALUE_TYPE': 'PRIMARY_SOURCE_CODE', 'VALUE_CODE': 'GW', 'VALUE_DESCRIPTION': 'Groundwater'},
-        {'VALUE_TYPE': 'PRIMARY_SOURCE_CODE', 'VALUE_CODE': 'SW', 'VALUE_DESCRIPTION': 'Surface Water'},
-        {'VALUE_TYPE': 'PRIMARY_SOURCE_CODE', 'VALUE_CODE': 'GWP', 'VALUE_DESCRIPTION': 'Purchased Groundwater'},
-        {'VALUE_TYPE': 'PRIMARY_SOURCE_CODE', 'VALUE_CODE': 'SWP', 'VALUE_DESCRIPTION': 'Purchased Surface Water'},
-        {'VALUE_TYPE': 'PRIMARY_SOURCE_CODE', 'VALUE_CODE': 'GU',
-         'VALUE_DESCRIPTION': 'Groundwater under direct influence of surface water'},
+    # List of CSV files based on the provided README
+    filenames = [
+        "SDWA_PUB_WATER_SYSTEMS.csv",
+        "SDWA_VIOLATIONS_ENFORCEMENT.csv",
+        "SDWA_LCR_SAMPLES.csv",
+        "SDWA_SITE_VISITS.csv",
+        "SDWA_FACILITIES.csv",
+        "SDWA_GEOGRAPHIC_AREAS.csv",
+        "SDWA_REF_CODE_VALUES.csv",
+        "SDWA_EVENTS_MILESTONES.csv",
+        "SDWA_PN_VIOLATION_ASSOC.csv",
+        # "SDWA_REF_ANSI_AREAS.csv",
+        "SDWA_SERVICE_AREAS.csv"
     ]
-    data['SDWA_REF_CODE_VALUES'] = pd.DataFrame(ref_codes)
+
+    # Create a mapping from filename to a key used in the app
+    file_keys = {f: f.replace('.csv', '') for f in filenames}
+
+    # print current directory
+    print(os.getcwd())
+
+    for filename in filenames:
+        try:
+            # The key in the data dictionary should match what the app expects
+            key = file_keys[filename]
+            # low_memory=False can help with mixed data types in large files
+            data[key] = pd.read_csv(filename, low_memory=False)
+
+        except FileNotFoundError:
+            st.error(
+                f"Error: The file '{filename}' was not found in the same directory as the script. Please make sure all CSV files are present.")
+            # Return an empty dict to prevent further errors
+            return {}
+        except Exception as e:
+            st.error(f"An error occurred while loading '{filename}': {e}")
+            return {}
+
+    # Check if essential files were loaded
+    if 'SDWA_PUB_WATER_SYSTEMS' not in data or data['SDWA_PUB_WATER_SYSTEMS'].empty:
+        st.error(
+            "The essential 'SDWA_PUB_WATER_SYSTEMS.csv' file could not be loaded or is empty. The dashboard cannot continue.")
+        return {}
 
     return data
 
 
-data = load_mock_data()
+data = load_real_data()
+
+# --- Stop script if data loading failed ---
+if not data:
+    st.stop()
 
 
 # --- Helper Functions ---
@@ -175,11 +84,14 @@ def get_pws_name(pwsid):
 
 def get_code_description(value_type, value_code):
     """Looks up a description for a given code from the reference table."""
+    # Ensure value_code is not NaN before query
+    if pd.isna(value_code):
+        return "N/A"
     ref_df = data['SDWA_REF_CODE_VALUES']
-    desc = ref_df[(ref_df['VALUE_TYPE'] == value_type) & (ref_df['VALUE_CODE'] == value_code)]
+    desc = ref_df[(ref_df['VALUE_TYPE'] == value_type) & (ref_df['VALUE_CODE'] == str(value_code))]
     if not desc.empty:
         return desc['VALUE_DESCRIPTION'].iloc[0]
-    return value_code
+    return str(value_code)
 
 
 # --- Main App ---
@@ -190,8 +102,8 @@ st.markdown("Insights from the Q1 2025 SDWIS Data Export for the State of Georgi
 st.sidebar.header("Filter by Water System")
 # Create a mapping from PWSID to a more descriptive name for the selectbox
 pws_options = data['SDWA_PUB_WATER_SYSTEMS'][['PWSID', 'PWS_NAME', 'CITY_NAME']].copy()
-pws_options['display_name'] = pws_options['PWS_NAME'] + " (" + pws_options['CITY_NAME'] + ", " + pws_options[
-    'PWSID'] + ")"
+pws_options['display_name'] = pws_options['PWS_NAME'] + " (" + pws_options['CITY_NAME'].astype(str) + ", " + \
+                              pws_options['PWSID'] + ")"
 pws_display_map = pd.Series(pws_options.PWSID.values, index=pws_options.display_name).to_dict()
 
 selected_pws_display = st.sidebar.selectbox(
@@ -259,7 +171,7 @@ with tab1:
                 st.markdown(f"**Period Start:** {row['NON_COMPL_PER_BEGIN_DATE']}")
             with col3:
                 st.markdown(
-                    f"**Period End:** {row['NON_COMPL_PER_END_DATE'] if row['NON_COMPL_PER_END_DATE'] else 'Ongoing'}")
+                    f"**Period End:** {row['NON_COMPL_PER_END_DATE'] if pd.notna(row['NON_COMPL_PER_END_DATE']) else 'Ongoing'}")
             st.markdown("---")
 
     st.subheader("Lead and Copper Rule (LCR) Sample Results")
@@ -471,4 +383,3 @@ with tab5:
     - [SDWIS Search User Guide](https://www.epa.gov/enviro/sdwis-search-user-guide)
     """
     st.markdown(readme_content)
-
