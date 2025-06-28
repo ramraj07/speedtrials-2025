@@ -105,61 +105,72 @@
         const promises = filesToLoad.map(file => new Promise((resolve, reject) => { Papa.parse(file, { download: true, header: true, skipEmptyLines: true, complete: results => resolve({ name: file, data: results.data }), error: err => reject(err) }); }));
         Promise.all(promises).then(files => { files.forEach(file => { DATA_STORE[file.name] = file.data; }); prepareInitialData(); $loader.fadeOut(); }).catch(err => { console.error("Error loading or processing data:", err); $loader.html('<p style="color:red;">Failed to load data files. This application cannot run. Please check the browser console for more details.</p>'); });
         function prepareInitialData() { DATA_STORE["SDWA_REF_CODE_VALUES.csv"].forEach(d => { CODES_MAP.set(`${d.VALUE_TYPE}|${d.VALUE_CODE}`, d.VALUE_DESCRIPTION); }); const systems = new Map(DATA_STORE["SDWA_PUB_WATER_SYSTEMS.csv"].map(d => [d.PWSID, d])); const geo = DATA_STORE["SDWA_GEOGRAPHIC_AREAS.csv"]; PWS_SEARCH_OPTIONS = [...systems.values()].filter(s => s.PWS_NAME && s.PWS_ACTIVITY_CODE === 'A').map(s => { const zips = new Set(geo.filter(g => g.PWSID === s.PWSID && g.AREA_TYPE_CODE === 'ZC').map(g => g.ZIP_CODE_SERVED)); const searchTerms = [ (s.PWS_NAME || '').toLowerCase(), (s.PWSID || '').toLowerCase(), (s.PRINCIPAL_CITY_SERVED_NAME || '').toLowerCase(), ...[...zips].map(zip => (zip || '').toLowerCase()) ].join(' '); return { id: s.PWSID, text: `${s.PWS_NAME} (${s.PWSID})`, searchTerms: searchTerms }; }); $('#pws-select').select2({ data: PWS_SEARCH_OPTIONS, placeholder: 'Enter ZIP, City, or System Name...', theme: "bootstrap", matcher: (params, data) => { if ($.trim(params.term) === '') return data; if (typeof data.searchTerms === 'undefined') return null; if (data.searchTerms.indexOf(params.term.toLowerCase()) > -1) { return data; } return null; } }).on('select2:select', function (e) { const pwsId = e.params.data.id; if (pwsId) { showDashboard([pwsId]); } }); const violationCounts = new Map(); const fiveYearsAgo = new Date(); fiveYearsAgo.setFullYear(fiveYearsAgo.getFullYear() - 5); DATA_STORE["SDWA_VIOLATIONS_ENFORCEMENT.csv"].forEach(v => { const violationDate = new Date(v.NON_COMPL_PER_BEGIN_DATE); if (violationDate >= fiveYearsAgo) { const currentCount = violationCounts.get(v.PWSID) || 0; violationCounts.set(v.PWSID, currentCount + 1); } }); const allPwsIds = new Set([...systems.keys()]); allPwsIds.forEach(pwsid => { if (!violationCounts.has(pwsid)) { violationCounts.set(pwsid, 0); } }); const sortedPws = [...violationCounts.entries()].map(([pwsid, count]) => ({ pwsid, count, name: systems.get(pwsid)?.PWS_NAME, city: systems.get(pwsid)?.PRINCIPAL_CITY_SERVED_NAME })).filter(p => p.name).sort((a, b) => a.count - b.count); const cleanest = sortedPws.slice(0, 5); const worst = sortedPws.slice(-5).reverse(); cleanest.forEach(p => $('#cleanest-pws').append(`<li class="list-group-item browse-item d-flex justify-content-between align-items-center" data-pwsid="${p.pwsid}">${p.name}<span class="badge badge-success badge-pill">${p.count}</span></li>`)); worst.forEach(p => $('#worst-pws').append(`<li class="list-group-item browse-item d-flex justify-content-between align-items-center" data-pwsid="${p.pwsid}">${p.name}<span class="badge badge-danger badge-pill">${p.count}</span></li>`)); }
-
-        // --- EVENT HANDLERS ---
-        function showDashboard(pwsIDs) {
-            $landingPage.fadeOut('fast', () => {
-                window.scrollTo(0, 0);
-                // First, generate all the content (tables, titles, etc.)
-                // The chart will be drawn here but might have the wrong width initially.
-                generateDashboard(pwsIDs);
-
-                // Now, fade in the dashboard container.
-                $dashboardPage.fadeIn('fast', function() {
-                    // *** THIS IS THE FIX ***
-                    // This 'complete' function runs AFTER the fadeIn animation is finished.
-                    // At this point, the container has its final, full width.
-                    // We tell Plotly to check the container size again and resize the chart.
-                    const ganttChart = document.getElementById('gantt-chart');
-                    if (ganttChart && ganttChart.data) {
-                        Plotly.Plots.resize(ganttChart);
-                    }
-                });
-            });
-        }
-
+        function showDashboard(pwsIDs) { $landingPage.fadeOut('fast', () => { window.scrollTo(0, 0); generateDashboard(pwsIDs); $dashboardPage.fadeIn('fast', function() { const ganttChart = document.getElementById('gantt-chart'); if (ganttChart && ganttChart.data) { Plotly.Plots.resize(ganttChart); } }); }); }
         $('#back-to-search').on('click', function() { $dashboardPage.fadeOut('fast', () => { $('#pws-select').val(null).trigger('change'); $landingPage.fadeIn('fast'); }); });
         $('#landing-page').on('click', '.browse-item', function() { const pwsId = $(this).data('pwsid'); if (pwsId) { showDashboard([pwsId]); } });
 
         function generateDashboard(pwsIDs) {
-            // This function's internal logic remains unchanged.
             function parseDate(dateString) { if (!dateString || typeof dateString !== 'string') return null; if (dateString.includes('-')) { const d = new Date(dateString); return isNaN(d) ? null : d; } const parts = dateString.split('/'); if (parts.length === 3) { const year = parseInt(parts[2], 10); const month = parseInt(parts[0], 10) - 1; const day = parseInt(parts[1], 10); const dt = new Date(year, month, day); if (!isNaN(dt) && dt.getFullYear() === year && dt.getMonth() === month && dt.getDate() === day) { return dt; } } return null; }
             const systemsData = DATA_STORE['SDWA_PUB_WATER_SYSTEMS.csv'];
             const systemInfo = systemsData.find(s => s.PWSID === pwsIDs[0]);
             $('#dashboard-title').text(systemInfo?.PWS_NAME || 'Water System Dashboard');
             $('#dashboard-subtitle').text(`Serving ${systemInfo?.PRINCIPAL_CITY_SERVED_NAME || 'N/A'} | PWSID: ${pwsIDs[0]}`);
             const violations = DATA_STORE["SDWA_VIOLATIONS_ENFORCEMENT.csv"].filter(v => pwsIDs.includes(v.PWSID));
+
+            // FIX 2: Enhance ganttData to include measurement values
             const ganttData = violations.map(v => {
                 const startDate = parseDate(v.NON_COMPL_PER_BEGIN_DATE);
                 const finishDate = parseDate(v.RTC_DATE) || parseDate(v.NON_COMPL_PER_END_DATE) || new Date();
                 const contaminant = CODES_MAP.get(`CONTAMINANT_CODE|${v.CONTAMINANT_CODE}`) || v.VIOLATION_CODE || 'Unknown Violation';
                 if (startDate && finishDate && startDate < finishDate) {
-                    return { Task: contaminant.length > 50 ? contaminant.substring(0, 47) + '...' : contaminant, FullTask: contaminant, Start: startDate.toISOString().split('T')[0], Finish: finishDate.toISOString().split('T')[0], Resource: v.IS_HEALTH_BASED_IND === 'Y' ? 'Health-Based' : 'Non-Health-Based', Details: CODES_MAP.get(`VIOLATION_CODE|${v.VIOLATION_CODE}`) || 'No details' };
+                    return {
+                        Task: contaminant.length > 50 ? contaminant.substring(0, 47) + '...' : contaminant,
+                        FullTask: contaminant,
+                        Start: startDate.toISOString().split('T')[0],
+                        Finish: finishDate.toISOString().split('T')[0],
+                        Resource: v.IS_HEALTH_BASED_IND === 'Y' ? 'Health-Based' : 'Non-Health-Based',
+                        Details: CODES_MAP.get(`VIOLATION_CODE|${v.VIOLATION_CODE}`) || 'No details',
+                        // Add new fields for the tooltip
+                        measuredValue: v.MCL_VIOL_MEASURE,
+                        limitValue: v.MCL_VIOL_MCL_VALUE,
+                        unit: v.MCL_VIOL_MCL_UOM
+                    };
                 }
                 return null;
             }).filter(Boolean);
 
             if (ganttData.length > 0) {
                 $('#gantt-chart-container').show();
-                 const plotData = ganttData.map(d => ({
-                    x: [d.Start, d.Finish], y: [d.Task, d.Task],
-                    mode: 'lines', type: 'scatter', showlegend: false,
-                    line: { color: d.Resource === 'Health-Based' ? 'rgba(217, 83, 79, 0.8)' : 'rgba(240, 173, 78, 0.8)', width: 20 },
-                    hoverinfo: 'text',
-                    text: `<b>${d.FullTask}</b><br>Type: ${d.Details}<br>Period: ${d.Start} to ${d.Finish}<br>Classification: ${d.Resource}`
-                }));
+
+                 // FIX 1: Build plotData by layering a border trace and a fill trace for each violation
+                const plotData = [];
+                ganttData.forEach(d => {
+                    // Build the detailed tooltip text
+                    let tooltipText = `<b>${d.FullTask}</b><br>Type: ${d.Details}<br>Period: ${d.Start} to ${d.Finish}<br>Classification: ${d.Resource}`;
+                    if (d.measuredValue && d.limitValue) {
+                        tooltipText += `<br><br><b>Result: ${d.measuredValue} ${d.unit || ''}</b><br>Limit: ${d.limitValue} ${d.unit || ''}`;
+                    }
+
+                    // The dark border trace (thicker, no hover info)
+                    plotData.push({
+                        x: [d.Start, d.Finish], y: [d.Task, d.Task],
+                        mode: 'lines', type: 'scatter', showlegend: false,
+                        line: { color: '#333333', width: 22 },
+                        hoverinfo: 'none'
+                    });
+                    // The main colored fill trace (sits on top of the border)
+                    plotData.push({
+                        x: [d.Start, d.Finish], y: [d.Task, d.Task],
+                        mode: 'lines', type: 'scatter', showlegend: false,
+                        line: { color: d.Resource === 'Health-Based' ? 'rgba(217, 83, 79, 0.9)' : 'rgba(240, 173, 78, 0.9)', width: 20 },
+                        hoverinfo: 'text',
+                        text: tooltipText
+                    });
+                });
+
                 plotData.push({ x: [null], y: [null], mode: 'markers', name: 'Health-Based', marker: { color: 'rgba(217, 83, 79, 1)', size: 10 } });
                 plotData.push({ x: [null], y: [null], mode: 'markers', name: 'Non-Health-Based', marker: { color: 'rgba(240, 173, 78, 1)', size: 10 } });
+
                 const presentDay = new Date().toISOString().split('T')[0];
                 const layout = {
                     autosize: true,
