@@ -117,7 +117,6 @@
             $('#dashboard-subtitle').text(`Serving ${systemInfo?.PRINCIPAL_CITY_SERVED_NAME || 'N/A'} | PWSID: ${pwsIDs[0]}`);
             const violations = DATA_STORE["SDWA_VIOLATIONS_ENFORCEMENT.csv"].filter(v => pwsIDs.includes(v.PWSID));
 
-            // FIX 2: Enhance ganttData to include measurement values
             const ganttData = violations.map(v => {
                 const startDate = parseDate(v.NON_COMPL_PER_BEGIN_DATE);
                 const finishDate = parseDate(v.RTC_DATE) || parseDate(v.NON_COMPL_PER_END_DATE) || new Date();
@@ -130,7 +129,6 @@
                         Finish: finishDate.toISOString().split('T')[0],
                         Resource: v.IS_HEALTH_BASED_IND === 'Y' ? 'Health-Based' : 'Non-Health-Based',
                         Details: CODES_MAP.get(`VIOLATION_CODE|${v.VIOLATION_CODE}`) || 'No details',
-                        // Add new fields for the tooltip
                         measuredValue: v.MCL_VIOL_MEASURE,
                         limitValue: v.MCL_VIOL_MCL_VALUE,
                         unit: v.MCL_VIOL_MCL_UOM
@@ -142,23 +140,23 @@
             if (ganttData.length > 0) {
                 $('#gantt-chart-container').show();
 
-                 // FIX 1: Build plotData by layering a border trace and a fill trace for each violation
                 const plotData = [];
                 ganttData.forEach(d => {
-                    // Build the detailed tooltip text
                     let tooltipText = `<b>${d.FullTask}</b><br>Type: ${d.Details}<br>Period: ${d.Start} to ${d.Finish}<br>Classification: ${d.Resource}`;
                     if (d.measuredValue && d.limitValue) {
                         tooltipText += `<br><br><b>Result: ${d.measuredValue} ${d.unit || ''}</b><br>Limit: ${d.limitValue} ${d.unit || ''}`;
                     }
 
-                    // The dark border trace (thicker, no hover info)
+                    // The dark border trace
                     plotData.push({
                         x: [d.Start, d.Finish], y: [d.Task, d.Task],
                         mode: 'lines', type: 'scatter', showlegend: false,
                         line: { color: '#333333', width: 22 },
-                        hoverinfo: 'none'
+                        // *** THIS IS THE FIX ***
+                        // 'skip' makes this layer invisible to the mouse hover engine.
+                        hoverinfo: 'skip'
                     });
-                    // The main colored fill trace (sits on top of the border)
+                    // The main colored fill trace
                     plotData.push({
                         x: [d.Start, d.Finish], y: [d.Task, d.Task],
                         mode: 'lines', type: 'scatter', showlegend: false,
