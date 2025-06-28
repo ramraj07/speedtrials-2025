@@ -267,7 +267,7 @@
     <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 
-    <!-- Main Application Logic (Unchanged) -->
+    <!-- Main Application Logic -->
     <script>
     $(document).ready(function() {
         // --- Global State ---
@@ -284,27 +284,23 @@
         const $dashboardView = $('#dashboard-view');
         const $zipInput = $('#zip-search-input');
         const $pwsSelect = $('#pws-select');
-        const $alertModal = $('#alert-modal');
-        const $alertMessage = $('#alert-message');
-        const $alertCloseBtn = $('#alert-close-btn');
 
         // --- Data Loading ---
+        // REVERTED: Using original local file paths as requested.
+        // NOTE: This will only work if the files are served by a local web server.
         const filesToLoad = [
-            "https://storage.googleapis.com/bigquery-public-data/epa/sdwis/SDWA_VIOLATIONS_ENFORCEMENT.csv",
-            "https://storage.googleapis.com/bigquery-public-data/epa/sdwis/SDWA_PUB_WATER_SYSTEMS.csv",
-            "https://storage.googleapis.com/bigquery-public-data/epa/sdwis/SDWA_GEOGRAPHIC_AREAS.csv",
-            "https://storage.googleapis.com/bigquery-public-data/epa/sdwis/SDWA_REF_CODE_VALUES.csv",
-            "https://storage.googleapis.com/bigquery-public-data/epa/sdwis/SDWA_SITE_VISITS.csv",
-            "https://storage.googleapis.com/bigquery-public-data/epa/sdwis/SDWA_FACILITIES.csv",
-            // A publicly available Zip Code to Lat/Long CSV
-            "https://gist.githubusercontent.com/erichurst/7882666/raw/5bdc46db47d9515269ab12ed6fb2850377fd869e/US%2520Zip%2520Codes%2520from%25202013%2520Government%2520Data"
+            "data/SDWA_VIOLATIONS_ENFORCEMENT.csv",
+            "data/SDWA_PUB_WATER_SYSTEMS.csv",
+            "data/SDWA_GEOGRAPHIC_AREAS.csv",
+            "data/SDWA_REF_CODE_VALUES.csv",
+            "data/SDWA_SITE_VISITS.csv",
+            "data/SDWA_FACILITIES.csv",
+            "data/zipCodeToLatLong.csv"
         ];
 
         let loadedCount = 0;
         const promises = filesToLoad.map(file => new Promise((resolve, reject) => {
-            const isZipFile = file.includes('erichurst');
-            let fileName = isZipFile ? 'zipCodeToLatLong.csv' : file.substring(file.lastIndexOf('/') + 1);
-
+            const fileName = file.substring(file.lastIndexOf('/') + 1);
             Papa.parse(file, {
                 download: true, header: true, skipEmptyLines: true,
                 complete: results => {
@@ -312,7 +308,7 @@
                     $('#loader-message').text(`Loading... (${loadedCount}/${filesToLoad.length}) ${fileName}`);
                     resolve({ name: fileName, data: results.data });
                 },
-                error: err => reject(new Error(`Failed to load ${fileName}: ${err.message || 'Unknown error'}`))
+                error: (err, f) => reject(new Error(`Failed to load ${fileName}. Ensure it's accessible via a local server.`))
             });
         }));
 
@@ -322,7 +318,7 @@
             $loader.fadeOut();
             $mapView.fadeIn('fast', () => { if (map) map.invalidateSize(); });
         }).catch(err => {
-            $loader.html(`<div class="p-4 bg-red-100 border border-red-400 text-red-700 rounded-lg max-w-md mx-auto" role="alert"><h4>Data Loading Failed</h4><p>${err.message}</p></div>`);
+            $loader.html(`<div class="p-4 bg-red-100 border border-red-400 text-red-700 rounded-lg max-w-lg mx-auto" role="alert"><h4 class="font-bold">Data Loading Failed</h4><p class="mt-2">${err.message}</p><p class="mt-2 text-sm">This is likely due to browser security restrictions. Please see the instructions on running a local web server.</p></div>`);
         });
 
         // --- View Initialization ---
@@ -330,15 +326,15 @@
             const systemsData = DATA_STORE['SDWA_PUB_WATER_SYSTEMS.csv'];
             const zipCodeData = DATA_STORE['zipCodeToLatLong.csv'];
 
+            // REVERTED: Using original field names (e.g., 'zip', 'lat') from the user's first code version.
             ZIP_COORDS = zipCodeData.reduce((acc, record) => {
-                const zip = record.ZIP;
-                const lat = record.LAT;
-                const lon = record.LNG;
+                const zip = record.zip || record.ZIP;
+                const lat = record.latitude || record.lat || record.LAT;
+                const lon = record.longitude || record.lng || record.lon || record.LNG;
                 if (zip && lat && lon) acc[zip] = { lat: parseFloat(lat), lon: parseFloat(lon) };
                 return acc;
             }, {});
 
-            // Filter for Georgia systems and geocode them
             const georgiaSystems = systemsData.filter(sys => sys.PWSID && sys.PWSID.startsWith('GA'));
 
             GEOCODED_SYSTEMS = georgiaSystems.map(system => {
@@ -373,7 +369,7 @@
 
         // --- UI Event Handlers ---
         function showAlert(message) {
-            alert(message); // Using native alert as a fallback since modal isn't in HTML
+            alert(message);
         }
 
         $('#zip-search-btn').on('click', function() {
@@ -393,13 +389,12 @@
         $('#reset-map-view-btn').on('click', function() {
             $zipInput.val('');
             if (map) {
-                map.setView([32.8407, -83.6324], 7); // Center of Georgia
+                map.setView([32.8407, -83.6324], 7);
             }
         });
 
         $('#back-to-map').on('click', showMapView);
 
-        // Use event delegation for dynamically created buttons
         $(document).on('click', '.view-details-btn', function() {
             const pwsid = $(this).data('pwsid');
             if (pwsid) {
@@ -415,9 +410,7 @@
                 generateDashboard(pwsId);
                 $dashboardView.fadeIn('fast', () => {
                     const ganttChart = document.getElementById('gantt-chart');
-                    if (ganttChart && ganttChart.data) {
-                        Plotly.Plots.resize(ganttChart);
-                    }
+                    if (ganttChart && ganttChart.data) Plotly.Plots.resize(ganttChart);
                 });
             });
         }
@@ -437,10 +430,9 @@
 
         // --- Map Generation ---
         function generateMapView() {
-            const violationCounts = DATA_STORE['SDWA_VIOLATIONS_ENFORCEMENT.csv'].reduce((acc, record) => {
-                if (record.PWSID && record.PWSID.startsWith('GA')) {
-                    acc[record.PWSID] = (acc[record.PWSID] || 0) + 1;
-                }
+            const georgiaViolations = DATA_STORE['SDWA_VIOLATIONS_ENFORCEMENT.csv'].filter(v => v.PWSID && v.PWSID.startsWith('GA'));
+            const violationCounts = georgiaViolations.reduce((acc, record) => {
+                acc[record.PWSID] = (acc[record.PWSID] || 0) + 1;
                 return acc;
             }, {});
 
@@ -460,22 +452,18 @@
             map = L.map('map').setView([32.8407, -83.6324], 7);
             L.tileLayer('https://{s}.tile.jawg.io/jawg-light/{z}/{x}/{y}{r}.png?access-token={accessToken}', {
                 attribution: '<a href="http://jawg.io" title="Tiles Courtesy of Jawg Maps" target="_blank">&copy; <b>Jawg</b>Maps</a> &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-                minZoom: 0,
-                maxZoom: 22,
-                subdomains: 'abcd',
-                accessToken: 'F3Z1b6a4zQ2u9eQz5rA1YqX2a8c3e8i3B4G8h6c1J2e3F4d5A6g7H8i9' // Example token, replace if needed
+                minZoom: 0, maxZoom: 22, subdomains: 'abcd',
+                accessToken: 'F3Z1b6a4zQ2u9eQz5rA1YqX2a8c3e8i3B4G8h6c1J2e3F4d5A6g7H8i9'
             }).addTo(map);
 
             systemsInGeorgia.forEach(system => {
                 const marker = L.circleMarker([system.lat, system.lon], {
-                    radius: 7,
-                    fillColor: getMarkerColor(system.violationCount, dynamicThresholds),
+                    radius: 7, fillColor: getMarkerColor(system.violationCount, dynamicThresholds),
                     color: "#1f2937", weight: 1, opacity: 1, fillOpacity: 0.8
                 }).addTo(map);
 
                 const popupContent = `<div class="text-gray-800">
-                    <h3 class="font-bold text-base mb-1">${system.name}</h3>
-                    <hr class="my-1">
+                    <h3 class="font-bold text-base mb-1">${system.name}</h3><hr class="my-1">
                     <p class="text-sm"><strong>PWSID:</strong> ${system.pwsid}</p>
                     <p class="text-sm"><strong style="color:${getMarkerColor(system.violationCount, dynamicThresholds)};">Violations: ${system.violationCount}</strong></p>
                     <button class="btn-popup-details view-details-btn" data-pwsid="${system.pwsid}">View Details</button>
@@ -487,10 +475,17 @@
             legend.onAdd = function (map) {
                 const div = L.DomUtil.create('div', 'info legend');
                 const grades = [0, 1, dynamicThresholds.yellow, dynamicThresholds.orange, dynamicThresholds.red];
-                const labels = [ '0 Violations', `1 - ${dynamicThresholds.yellow - 1}`, `${dynamicThresholds.yellow} - ${dynamicThresholds.orange - 1}`, `${dynamicThresholds.orange} - ${dynamicThresholds.red - 1}`, `${dynamicThresholds.red}+` ];
+                const labels = [
+                    '0 Violations',
+                    `1 to ${dynamicThresholds.yellow - 1}`,
+                    `${dynamicThresholds.yellow} to ${dynamicThresholds.orange - 1}`,
+                    `${dynamicThresholds.orange} to ${dynamicThresholds.red - 1}`,
+                    `${dynamicThresholds.red}+`
+                ];
                 div.innerHTML += '<h4>Violation Count</h4>';
                 for (let i = 0; i < grades.length; i++) {
-                    const color = getMarkerColor(grades[i] + (i===0 ? 0 : 0), dynamicThresholds); // Adjust logic for color retrieval
+                    const color = getMarkerColor(grades[i], dynamicThresholds);
+                    if (i > 0 && grades[i] >= (grades[i+1] || Infinity)) continue;
                     div.innerHTML += `<i style="background:${color}"></i> ${labels[i]}<br>`;
                 }
                 return div;
@@ -499,106 +494,25 @@
         }
 
         function getMarkerColor(count, thresholds) {
-            if (count >= thresholds.red) return '#ef4444'; // red-500
-            if (count >= thresholds.orange) return '#f97316'; // orange-500
-            if (count >= thresholds.yellow) return '#f59e0b'; // amber-500
-            if (count > 0) return '#eab308'; // yellow-500
-            return '#22c55e'; // green-500
+            if (count >= thresholds.red) return '#ef4444';     // red-500
+            if (count >= thresholds.orange) return '#f97316';  // orange-500
+            if (count >= thresholds.yellow) return '#f59e0b';  // amber-500
+            if (count > 0) return '#eab308';                   // yellow-500
+            return '#22c55e';                                  // green-500
         }
 
         // --- Dashboard Generation ---
         function generateDashboard(pwsId) {
             function parseDate(dateString) { if (!dateString || typeof dateString !== 'string') return null; const d = new Date(dateString.replace(/(\d{2})\/(\d{2})\/(\d{4})/, '$3-$1-$2')); return isNaN(d) ? null : d; }
+
             const systemInfo = DATA_STORE['SDWA_PUB_WATER_SYSTEMS.csv'].find(s => s.PWSID === pwsId);
             $('#dashboard-title').text(systemInfo?.PWS_NAME || 'Water System Dashboard');
             $('#dashboard-subtitle').text(`Serving ${systemInfo?.PRINCIPAL_CITY_SERVED_NAME || 'N/A'} | PWSID: ${pwsId}`);
 
             const violations = DATA_STORE["SDWA_VIOLATIONS_ENFORCEMENT.csv"].filter(v => v.PWSID === pwsId);
+
+            // REVERTED: Using original field names from user's first code version
             const ganttData = violations.map(v => {
                 const startDate = parseDate(v.NON_COMPL_PER_BEGIN_DATE);
                 const finishDate = parseDate(v.RTC_DATE) || parseDate(v.NON_COMPL_PER_END_DATE) || new Date();
-                const contaminant = CODES_MAP.get(`CONTAMINANT_CODE|${v.CONTAMINANT_CODE}`) || v.VIOLATION_CODE || 'Unknown Violation';
-                if (startDate && finishDate && startDate <= finishDate) { return { Task: contaminant.length > 50 ? contaminant.substring(0, 47) + '...' : contaminant, FullTask: contaminant, Start: startDate.toISOString().split('T')[0], Finish: finishDate.toISOString().split('T')[0], Resource: v.IS_HEALTH_BASED_IND === 'Y' ? 'Health-Based' : 'Non-Health-Based', Details: CODES_MAP.get(`VIOLATION_CODE|${v.VIOLATION_CODE}`) || 'No details', measuredValue: v.RESULT, limitValue: v.MCL_VALUE, unit: v.UNIT_OF_MEASURE }; }
-                return null;
-            }).filter(Boolean);
-
-            if (ganttData.length > 0) {
-                $('#gantt-chart-container').show();
-                const plotData = ganttData.flatMap(d => {
-                    let tooltipText = `<b>${d.FullTask}</b><br>Type: ${d.Details}<br>Period: ${d.Start} to ${d.Finish}<br>Classification: ${d.Resource}`;
-                    if (d.measuredValue && d.limitValue) { tooltipText += `<br><br><b>Result: ${d.measuredValue} ${d.unit || ''}</b><br>Limit: ${d.limitValue} ${d.unit || ''}`; }
-                    return [
-                        // This invisible layer provides a larger hover target
-                        { x: [d.Start, d.Finish], y: [d.Task, d.Task], mode: 'lines', type: 'scatter', showlegend: false, line: { color: 'transparent', width: 20 }, hoverinfo: 'text', text: tooltipText },
-                        // This is the visible bar
-                        { x: [d.Start, d.Finish], y: [d.Task, d.Task], mode: 'lines', type: 'scatter', showlegend: false, line: { color: d.Resource === 'Health-Based' ? '#ef4444' : '#f97316', width: 12, }, hoverinfo: 'none' }
-                    ];
-                });
-
-                // Legend items
-                plotData.push({ x: [null], y: [null], mode: 'markers', name: 'Health-Based', marker: { color: '#ef4444', size: 10 } });
-                plotData.push({ x: [null], y: [null], mode: 'markers', name: 'Non-Health-Based', marker: { color: '#f97316', size: 10 } });
-
-                const layout = {
-                    autosize: true,
-                    xaxis: { type: 'date', title: { text: 'Date of Violation Period', font: { color: '#4b5563' } }, gridcolor: '#e5e7eb' },
-                    yaxis: { automargin: true, autorange: 'reversed', showgrid: false },
-                    hovermode: 'closest',
-                    showlegend: true,
-                    legend: { x: 1, xanchor: 'right', y: 1.1, orientation: 'h' },
-                    margin: { l: 300, r: 20, t: 5, b: 50 },
-                    paper_bgcolor: 'rgba(0,0,0,0)',
-                    plot_bgcolor: 'rgba(0,0,0,0)',
-                    font: { family: 'Inter, sans-serif', color: '#374151' }
-                };
-                Plotly.newPlot('gantt-chart', plotData, layout, {responsive: true, displaylogo: false});
-            } else {
-                $('#gantt-chart-container').hide();
-                Plotly.purge('gantt-chart');
-            }
-
-            // --- AI Summary placeholder ---
-            const $summaryContainer = $('#water-quality-summary-container');
-            const $summaryLoader = $('#water-quality-summary-loader');
-            const $summaryContent = $('#water-quality-summary-content');
-            $summaryContent.empty();
-            $summaryLoader.hide();
-            // In a real scenario, you would make an API call here.
-            // For this demo, we'll show a placeholder message.
-            const summaryHtml = `<p class="text-gray-600">Water quality summary generation is currently unavailable. This feature could use an AI model to analyze the violations and provide a plain-language explanation of potential risks and trends for this water system.</p><small class="text-right d-block"><em>Source: AI Analysis (Demo)</em></small>`;
-            $summaryContent.html(summaryHtml);
-            $summaryContainer.show();
-
-
-            const siteVisits = DATA_STORE["SDWA_SITE_VISITS.csv"].filter(v => v.PWSID === pwsId).sort((a,b) => parseDate(b.VISIT_DATE) - parseDate(a.VISIT_DATE));
-            const facilities = DATA_STORE["SDWA_FACILITIES.csv"].filter(f => f.PWSID === pwsId && f.IS_SOURCE_IND === 'Y');
-            const $visitsTbody = $('#site-visits-table tbody').empty();
-            const tableRowClasses = 'bg-white border-b hover:bg-gray-50';
-            const tableCellClasses = 'px-6 py-4 text-gray-700';
-
-            if (siteVisits.length > 0) {
-                siteVisits.slice(0, 20).forEach(v => {
-                    const reason = CODES_MAP.get(`VISIT_REASON_CODE|${v.VISIT_REASON_CODE}`) || v.VISIT_REASON_CODE;
-                    const agency = CODES_MAP.get(`AGENCY_TYPE_CODE|${v.AGENCY_TYPE_CODE}`) || v.AGENCY_TYPE_CODE;
-                    $visitsTbody.append(`<tr class="${tableRowClasses}"><td class="${tableCellClasses} font-medium text-gray-900">${v.VISIT_DATE}</td><td class="${tableCellClasses}">${reason}</td><td class="${tableCellClasses}">${agency}</td><td class="${tableCellClasses}">${v.VISIT_COMMENTS || 'N/A'}</td></tr>`);
-                });
-            } else {
-                $visitsTbody.append(`<tr class="${tableRowClasses}"><td colspan="4" class="${tableCellClasses} text-center">No site visits found.</td></tr>`);
-            }
-
-            const $facilitiesTbody = $('#facilities-table tbody').empty();
-            if (facilities.length > 0) {
-                facilities.forEach(f => {
-                    const facType = CODES_MAP.get(`FACILITY_TYPE_CODE|${f.FACILITY_TYPE_CODE}`) || f.FACILITY_TYPE_CODE;
-                    const waterType = CODES_MAP.get(`WATER_TYPE_CODE|${f.WATER_TYPE_CODE}`) || f.WATER_TYPE_CODE;
-                    const availability = CODES_MAP.get(`AVAILABILITY_CODE|${f.AVAILABILITY_CODE}`) || f.AVAILABILITY_CODE;
-                    $facilitiesTbody.append(`<tr class="${tableRowClasses}"><td class="${tableCellClasses} font-medium text-gray-900">${f.FACILITY_NAME}</td><td class="${tableCellClasses}">${facType}</td><td class="${tableCellClasses}">${waterType}</td><td class="${tableCellClasses}">${availability}</td></tr>`);
-                });
-            } else {
-                $facilitiesTbody.append(`<tr class="${tableRowClasses}"><td colspan="4" class="${tableCellClasses} text-center">No source facilities found.</td></tr>`);
-            }
-        }
-    });
-    </script>
-</body>
-</html>
+                const contaminant = CODES_MAP.get(`CONTAMINANT_CODE|${v.CONTAMINANT_CODE}`) || v.VIOLAT
