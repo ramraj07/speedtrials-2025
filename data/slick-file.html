@@ -174,7 +174,7 @@
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/twitter-bootstrap/4.6.2/js/bootstrap.bundle.min.js"></script>
-    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
 
@@ -209,8 +209,8 @@
             prepareInitialData();
             $loader.fadeOut();
         }).catch(err => {
-            console.error("Error loading CSV files:", err);
-            $loader.html('<p style="color:red;">Failed to load critical data files. This application cannot run. Please check the browser console for more details.</p>');
+            console.error("Error loading or processing data:", err);
+            $loader.html('<p style="color:red;">Failed to load data files. This application cannot run. Please check the browser console for more details.</p>');
         });
 
         function prepareInitialData() {
@@ -227,10 +227,20 @@
                 .filter(s => s.PWS_NAME && s.PWS_ACTIVITY_CODE === 'A') // Active systems only
                 .map(s => {
                     const zips = new Set(geo.filter(g => g.PWSID === s.PWSID && g.AREA_TYPE_CODE === 'ZC').map(g => g.ZIP_CODE_SERVED));
+
+                    // FIX 2: Added guards to prevent .toLowerCase() on undefined values.
+                    // If a property is missing, it defaults to an empty string ''.
+                    const searchTerms = [
+                        (s.PWS_NAME || '').toLowerCase(),
+                        (s.PWSID || '').toLowerCase(),
+                        (s.PRINCIPAL_CITY_SERVED_NAME || '').toLowerCase(),
+                        ...[...zips].map(zip => (zip || '').toLowerCase())
+                    ].join(' ');
+
                     return {
                         id: s.PWSID,
                         text: `${s.PWS_NAME} (${s.PWSID})`,
-                        searchTerms: `${s.PWS_NAME.toLowerCase()} ${s.PWSID.toLowerCase()} ${s.PRINCIPAL_CITY_SERVED_NAME.toLowerCase()} ${[...zips].join(' ')}`
+                        searchTerms: searchTerms
                     };
                 });
 
@@ -238,7 +248,7 @@
                 data: PWS_SEARCH_OPTIONS,
                 placeholder: 'Enter ZIP, City, or System Name...',
                 theme: "bootstrap",
-                matcher: (params, data) => { // Custom matcher for flexible search
+                matcher: (params, data) => {
                     if ($.trim(params.term) === '') return data;
                     if (typeof data.searchTerms === 'undefined') return null;
                     if (data.searchTerms.indexOf(params.term.toLowerCase()) > -1) {
@@ -275,7 +285,7 @@
 
             const sortedPws = [...violationCounts.entries()]
                 .map(([pwsid, count]) => ({ pwsid, count, name: systems.get(pwsid)?.PWS_NAME, city: systems.get(pwsid)?.PRINCIPAL_CITY_SERVED_NAME }))
-                .filter(p => p.name) // Ensure the system exists and has a name
+                .filter(p => p.name)
                 .sort((a, b) => a.count - b.count);
 
             const cleanest = sortedPws.slice(0, 5);
@@ -296,12 +306,11 @@
 
         $('#back-to-search').on('click', function() {
             $dashboardPage.fadeOut('fast', () => {
-                 $('#pws-select').val(null).trigger('change'); // Clear selection
+                 $('#pws-select').val(null).trigger('change');
                 $landingPage.fadeIn('fast');
             });
         });
 
-        // Use event delegation for dynamically added list items
         $('#landing-page').on('click', '.browse-item', function() {
             const pwsId = $(this).data('pwsid');
             if (pwsId) {
@@ -317,14 +326,10 @@
             $('#dashboard-title').text(systemInfo?.PWS_NAME || 'Water System Dashboard');
             $('#dashboard-subtitle').text(`Serving ${systemInfo?.PRINCIPAL_CITY_SERVED_NAME || 'N/A'} | PWSID: ${pwsIDs[0]}`);
 
-
-            // Filter main data sources
             const violations = DATA_STORE["SDWA_VIOLATIONS_ENFORCEMENT.csv"].filter(v => pwsIDs.includes(v.PWSID));
             const siteVisits = DATA_STORE["SDWA_SITE_VISITS.csv"].filter(v => pwsIDs.includes(v.PWSID)).sort((a,b) => new Date(b.VISIT_DATE) - new Date(a.VISIT_DATE));
             const facilities = DATA_STORE["SDWA_FACILITIES.csv"].filter(f => pwsIDs.includes(f.PWSID) && f.IS_SOURCE_IND === 'Y');
 
-
-            // --- Gantt Chart ---
             const ganttData = violations.map(v => {
                 const today = new Date().toISOString().split('T')[0];
                 const startDate = v.NON_COMPL_PER_BEGIN_DATE;
@@ -356,7 +361,6 @@
                     text: `<b>${d.FullTask}</b><br>Type: ${d.Details}<br>Period: ${d.Start} to ${d.Finish}<br>Classification: ${d.Resource}`
                 }));
 
-                // Add invisible traces for a clean legend
                 plotData.push({ x: [null], y: [null], mode: 'markers', name: 'Health-Based', marker: { color: 'rgba(217, 83, 79, 1)', size: 10 } });
                 plotData.push({ x: [null], y: [null], mode: 'markers', name: 'Non-Health-Based', marker: { color: 'rgba(240, 173, 78, 1)', size: 10 } });
 
@@ -364,7 +368,6 @@
                     xaxis: {
                         type: 'date',
                         title: 'Date of Violation Period',
-                        // Default view to 2021-2025
                         range: ['2021-01-01', '2025-12-31'],
                         rangeselector: {buttons: [
                             {count: 1, label: '1y', step: 'year', stepmode: 'backward'},
@@ -372,7 +375,7 @@
                             {count: 5, label: '5y', step: 'year', stepmode: 'backward'},
                             {step: 'all'}
                         ]},
-                        rangeslider: {}, // Enable the range slider for easy navigation
+                        rangeslider: {},
                     },
                     yaxis: { automargin: true, autorange: 'reversed' },
                     hovermode: 'closest', showlegend: true, height: 400 + ganttData.length * 10,
@@ -383,10 +386,9 @@
                  $('#gantt-chart').html('<div class="alert alert-success text-center">Congratulations! No violations found for this water system.</div>');
             }
 
-            // --- Site Visits Table ---
             const visitsTbody = $('#site-visits-table tbody').empty();
             if (siteVisits.length > 0) {
-                siteVisits.slice(0, 20).forEach(v => { // Show latest 20
+                siteVisits.slice(0, 20).forEach(v => {
                     const reason = CODES_MAP.get(`VISIT_REASON_CODE|${v.VISIT_REASON_CODE}`) || v.VISIT_REASON_CODE;
                     const agency = CODES_MAP.get(`AGENCY_TYPE_CODE|${v.AGENCY_TYPE_CODE}`) || v.AGENCY_TYPE_CODE;
                     visitsTbody.append(`<tr><td>${v.VISIT_DATE}</td><td>${reason}</td><td>${agency}</td><td>${v.VISIT_COMMENTS || ''}</td></tr>`);
@@ -395,7 +397,6 @@
                 visitsTbody.append('<tr><td colspan="4" class="text-center">No site visits found.</td></tr>');
             }
 
-            // --- Facilities Table ---
             const facilitiesTbody = $('#facilities-table tbody').empty();
              if (facilities.length > 0) {
                 facilities.forEach(f => {
