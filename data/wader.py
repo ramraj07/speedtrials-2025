@@ -32,7 +32,7 @@ def load_real_data():
         "SDWA_REF_CODE_VALUES.csv",
         "SDWA_EVENTS_MILESTONES.csv",
         "SDWA_PN_VIOLATION_ASSOC.csv",
-        "SDWA_REF_ANSI_AREAS.csv",
+        # "SDWA_REF_ANSI_AREAS.csv",
         "SDWA_SERVICE_AREAS.csv"
     ]
 
@@ -105,7 +105,7 @@ pws_display_map = pd.Series(pws_options.PWSID.values, index=pws_options.display_
 
 selected_pws_display = st.sidebar.selectbox(
     "Select a Public Water System:",
-    options=sorted(pws_display_map.keys()),
+    options=sorted([str(x) for x in pws_display_map.keys()]),
     index=0
 )
 selected_pwsid = pws_display_map[selected_pws_display]
