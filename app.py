@@ -62,7 +62,11 @@ def load_all_data():
             try:
                 df = pd.read_csv(file_path, low_memory=False)
                 if 'SUBMISSIONYEARQUARTER' in df.columns:
-                    df['sortable_quarter'] = df['SUBMISSIONYEARQUARTER'].str.replace('Q', '').astype(int)
+                    # Ensure quarter column is numeric for sorting
+                    df['sortable_quarter'] = pd.to_numeric(df['SUBMISSIONYEARQUARTER'].str.replace('Q', ''),
+                                                           errors='coerce')
+                    df.dropna(subset=['sortable_quarter'], inplace=True)  # Drop rows where conversion failed
+                    df['sortable_quarter'] = df['sortable_quarter'].astype(int)
                 dataframes[file_key] = df
             except Exception as e:
                 print(f"Error loading {filename}: {e}")
@@ -84,51 +88,67 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 # --- Mount the data directory to be served publicly ---
-# A request to /data/SDWA_PUB_WATER_SYSTEMS.csv will serve that file
 app.mount("/data", StaticFiles(directory=DATA_DIR), name="data")
 
 
 # --- DATA PROCESSING & LLM FUNCTIONS ---
+
 def get_data_for_pwsid(pwsid: str) -> Dict[str, Any]:
+    """
+    Filters data for a given PWSID, applying separate sampling rules for
+    pre-2020 and post-2020 records before combining them.
+    """
     pws_data = {}
     for name, df in dataframes.items():
         if 'PWSID' in df.columns and 'sortable_quarter' in df.columns:
-            filtered_df = df[(df['PWSID'] == pwsid) & (df['sortable_quarter'] >= 20201)]
-            if not filtered_df.empty:
+            # Filter all data for the specific PWSID first
+            df_pws = df[df['PWSID'] == pwsid]
+
+            if df_pws.empty:
+                continue
+
+            # Split data into pre-2020 and post-2020 periods
+            pre_2020_df = df_pws[df_pws['sortable_quarter'] < 20201]
+            post_2020_df = df_pws[df_pws['sortable_quarter'] >= 20201]
+
+            # Sample pre-2020 data if it exceeds the max limit
+            if len(pre_2020_df) > 50:
+                pre_2020_df = pre_2020_df.sample(n=50, random_state=42)  # random_state for reproducible samples
+
+            # Sample post-2020 data if it exceeds the max limit
+            if len(post_2020_df) > 300:
+                post_2020_df = post_2020_df.sample(n=300, random_state=42)
+
+            # Combine the sampled dataframes
+            combined_df = pd.concat([pre_2020_df, post_2020_df])
+
+            # Sort the final combined dataframe to preserve chronological order
+            if not combined_df.empty:
+                combined_df = combined_df.sort_values('sortable_quarter', ascending=True)
                 clean_name = name.replace("SDWA_", "").replace("_", " ").title()
-                pws_data[clean_name] = filtered_df.to_dict(orient='records')
+                pws_data[clean_name] = combined_df.to_dict(orient='records')
+
     return pws_data
 
 
 def generate_summary_with_haiku(pwsid: str, data: Dict[str, Any]) -> str:
-    # --- MODIFICATION START ---
-
-    # Create a formatted string to hold multiple CSV blocks
-    data_as_csv_strings = []
-    for table_name, records in data.items():
-        if not records:
-            continue
-        # Convert the list of dictionary records back to a DataFrame
-        df = pd.DataFrame(records)
-        # Convert DataFrame to a CSV string, excluding the pandas index
-        csv_string = df.to_csv(index=False)
-
-        # Add the table name as a header for the model to understand context
-        data_as_csv_strings.append(f"--- Data from {table_name} ---\n{csv_string}")
-
-    # Join all the individual CSV blocks into one string
-    formatted_data = "\n\n".join(data_as_csv_strings)
-
-    # --- MODIFICATION END ---
-
-    prompt = f"""
-    Based on the following data for the public water system with ID {pwsid}, please provide a 1-3 paragraph summary of its water quality history since 2020. The summary should be easily understandable by a regular citizen, written in a clear and reassuring tone unless there are significant issues.
-
-    The data is provided in separate CSV-formatted blocks.
-
-    Data:
-    {formatted_data}
     """
+    Generates a summary using a detailed prompt that instructs the model
+    to avoid preambles and understand the data sampling.
+    """
+    prompt = f"""
+    You are a helpful assistant specializing in water quality reports. Your task is to provide a clear, concise summary for a citizen regarding the water quality history for the public water system with ID {pwsid}.
+
+    Here are the rules you must follow:
+    - Write in a clear and reassuring tone. If there are significant issues (like multiple violations), mention them calmly and factually.
+    - The summary should be 1-3 paragraphs long.
+    - **Do not use a preamble or any introductory phrases.** Begin the summary directly. For example, instead of saying "Based on the data provided...", start with something like "The water quality for this system has been generally satisfactory..." or "Records for this water system show a few violations over the past several years...".
+    - The data provided contains a sample of up to 100 records from before 2020 and up to 500 recent records from 2020 onwards. Your summary should synthesize findings from both periods if data is available for both.
+
+    Use the following data to generate your summary:
+    {str(data)}
+    """
+    print(f"{len(prompt)=}")
     try:
         message = client.messages.create(
             model="claude-3-haiku-20240307",
@@ -158,7 +178,7 @@ async def get_water_quality_summary(pwsid: str):
 
     data = get_data_for_pwsid(pwsid)
     if not data:
-        raise HTTPException(status_code=404, detail=f"PWSID '{pwsid}' not found or has no data available since 2020.")
+        raise HTTPException(status_code=404, detail=f"PWSID '{pwsid}' not found or has no data available.")
 
     summary = generate_summary_with_haiku(pwsid, data)
 
@@ -178,5 +198,5 @@ async def health_check():
 # 1. Place 'main.py' and 'index.html' in your project root.
 # 2. Create a 'data' folder in the root and place your CSVs inside it.
 # 3. Install dependencies: pip install "fastapi[all]" pandas anthropic
-# 4. Set your Anthropic API key.
+# 4. Set your Anthropic API key as an environment variable (ANTHROPIC_API_KEY).
 # 5. Run from your terminal: uvicorn main:app --reload
